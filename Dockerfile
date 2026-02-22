@@ -7,16 +7,17 @@ RUN apt-get update && \
         && \
     rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -g 1000 weather
+RUN useradd -u 1000 -g 1000 -m -s /bin/bash weather
+
 WORKDIR /vantage-publisher
 
 COPY requirements.txt requirements.txt
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
-COPY config.json config.json
-COPY parameters.json parameters.json
 COPY airlink.py airlink.py
-#COPY vantage-publisher.py vantage-publisher.py
+COPY vantage.log /var/log/vantage.log
+COPY vantage-publisher-threading.py vantage-publisher-threading.py
 
-COPY vantage-publisher-threading.py vantage-publisher.py
-CMD ["python", "-u", "vantage-publisher.py"]
+CMD ["python", "-u", "vantage-publisher-threading.py"]
