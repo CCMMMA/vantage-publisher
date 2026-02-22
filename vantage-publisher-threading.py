@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
-"""
-vantage-publisher-threading.py
-
-MQTT publisher for Davis VantagePro2 via ser2net TCP bridge:
-  VantagePro2.from_url("tcp:127.0.0.1:PORT")
-
-Includes:
-  - logging (no prints)
-  - daily CSV storage (YYYY/MM/YYYY-MM-DD.csv)
-  - AirLink integration (cached)
-  - MQTT store-and-forward offline buffer (SQLite FIFO)
-  - USB read thread (threading-based)
-
-Local dependency:
-  - airlink.py providing airlinkData(airlink_id) -> dict
-
-Expected config.json keys (as per your file):
-  uuid, name, lon, lat, usbPort, usbPollInterval, delay, timeout, pathStorage,
-  mqttBroker, mqttPort, mqttUser, mqttPass, mqttQos,
-  offlineMaxMessages, offlineMaxAgeSec, airlinkIntervalSec
-"""
+"""Threaded VantagePro2 publisher with CSV persistence and MQTT forwarding."""
 
 import os
 import json
@@ -28,6 +8,7 @@ import csv
 import threading
 import logging
 import sqlite3
+import signal
 from contextlib import closing
 from pathlib import Path
 from datetime import datetime
@@ -48,7 +29,10 @@ def setup_logging():
     log_file = os.getenv("LOG_FILE")  # e.g. /var/log/vantagepro2.log
 
     lg = logging.getLogger("vantage_publisher")
+    if lg.handlers:
+        return lg
     lg.setLevel(log_level)
+    lg.propagate = False
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
@@ -226,63 +210,172 @@ def save_data_to_csv(config_data, packet_data):
         logger.error(f"Error writing to CSV: {e}")
 
 
-# ---------------------------------------------------------------------
-# USB reading via ser2net (thread)
-# ---------------------------------------------------------------------
-def read_usb(url: str, parameters_data: dict) -> dict:
-    """One-shot read from VantagePro2 via TCP URL; safe against missing keys."""
-    device = None
-    try:
-        device = VantagePro2.from_url(url, timeout=3)
-        data = device.get_current_data() or {}
-        out = {}
-        for key, enabled in parameters_data.items():
-            if enabled:
-                val = data.get(key)
-                if val is not None:
-                    out[key] = val
-        return out
-    except Exception as e:
-        logger.error(f"USB read error: {e}")
-        return {}
-    finally:
-        try:
-            if device is not None:
-                device.close()
-        except Exception:
-            pass
+def load_json_file(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
+def load_parameters_map(path: Path):
+    if not path.exists():
+        logger.warning(f"Parameters file not found ({path}), all station fields enabled")
+        return None
+    data = load_json_file(path)
+    if not isinstance(data, dict):
+        raise SystemExit("parameters.json must contain a JSON object")
+    return {str(k): bool(v) for k, v in data.items()}
+
+
+def is_parameter_enabled(parameters_map, key: str) -> bool:
+    if parameters_map is None:
+        return True
+    return bool(parameters_map.get(key, False))
+
+
+def filter_payload(parameters_map, payload: dict) -> dict:
+    if parameters_map is None:
+        return dict(payload)
+    return {k: v for k, v in payload.items() if is_parameter_enabled(parameters_map, k)}
+
+
+def build_geojson_point(payload, station_uuid, name, latitude, longitude):
+    properties = dict(payload)
+    properties["uuid"] = station_uuid
+    properties["name"] = name
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "Point",
+            "coordinates": [float(longitude), float(latitude)],
+        },
+        "properties": properties,
+    }
+
+
+def normalize_config(cfg: dict) -> dict:
+    required = ("uuid", "name", "lat", "lon")
+    for key in required:
+        if key not in cfg:
+            raise SystemExit(f"config.json must define '{key}'")
+
+    root = Path(cfg["pathStorage"]) if cfg.get("pathStorage") else None
+    source = f"tcp:127.0.0.1:{int(cfg.get('usbPort', 22222))}"
+    timeout = float(cfg.get("timeout", 10))
+
+    return {
+        "raw": cfg,
+        "source": source,
+        "station_uuid": str(cfg["uuid"]),
+        "name": str(cfg["name"]),
+        "latitude": float(cfg["lat"]),
+        "longitude": float(cfg["lon"]),
+        "delay": float(cfg.get("delay", cfg.get("usbPollInterval", 2.0))),
+        "usb_poll_interval": float(cfg.get("usbPollInterval", 1.0)),
+        "timeout": timeout,
+        "pathStorage": str(root) if root else "",
+        "mqtt": {
+            "host": cfg.get("mqttBroker"),
+            "port": int(cfg.get("mqttPort", 1883)),
+            "username": cfg.get("mqttUser"),
+            "password": cfg.get("mqttPass"),
+            "qos": int(cfg.get("mqttQos", 1)),
+            "topic": str(cfg["uuid"]),
+            "keepalive": int(cfg.get("mqttKeepalive", 30)),
+            "reconnect_sleep": float(cfg.get("mqttReconnectSleep", 1.0)),
+        },
+        "offline_max_messages": int(cfg.get("offlineMaxMessages", 200000)),
+        "offline_max_age_sec": int(cfg.get("offlineMaxAgeSec", 7 * 86400)),
+        "airlink_interval_sec": int(cfg.get("airlinkIntervalSec", 300)),
+        "spool_path": Path(
+            cfg.get(
+                "mqttSpoolFile",
+                str((root or Path(".")) / "mqtt_offline_queue.sqlite"),
+            )
+        ),
+    }
+
+
+def is_mqtt_config_complete(mqtt_cfg: dict) -> bool:
+    return bool(mqtt_cfg.get("host")) and bool(mqtt_cfg.get("port"))
+
+
+# ---------------------------------------------------------------------
+# USB reading via ser2net (thread, persistent stream)
+# ---------------------------------------------------------------------
 class USBReaderThread(threading.Thread):
-    """Continuously reads from the station (ser2net TCP) and stores the latest packet."""
+    """Reads station data continuously and reconnects automatically on failures."""
 
-    def __init__(self, usb_url: str, parameters_data: dict, poll_interval_sec: float = 1.0):
+    def __init__(
+        self,
+        source: str,
+        timeout: float,
+        parameters_map,
+        stop_event: threading.Event,
+        poll_interval_sec: float = 1.0,
+    ):
         super().__init__(daemon=True)
-        self.usb_url = usb_url
-        self.parameters_data = parameters_data
+        self.source = source
+        self.timeout = float(timeout)
+        self.parameters_map = parameters_map
+        self.stop_event = stop_event
         self.poll_interval_sec = float(poll_interval_sec)
-        self._stop = threading.Event()
         self._lock = threading.Lock()
         self._latest = {}
         self._latest_ts = 0.0
+        self._latest_seq = 0
+        self._device = None
+        self._retry_delay = 1.0
 
-    def stop(self):
-        self._stop.set()
+    def _close_device(self):
+        if self._device is None:
+            return
+        try:
+            self._device.close()
+        except Exception:
+            pass
+        self._device = None
+
+    def _ensure_connected(self):
+        if self._device is not None:
+            return True
+        try:
+            self._device = VantagePro2.from_url(self.source, timeout=self.timeout)
+            logger.info(f"USB reader connected ({self.source})")
+            return True
+        except Exception as e:
+            logger.warning(f"USB connect error ({self.source}): {e}")
+            self._device = None
+            return False
 
     def get_latest(self):
         with self._lock:
-            return dict(self._latest), float(self._latest_ts)
+            return dict(self._latest), float(self._latest_ts), int(self._latest_seq)
 
     def run(self):
-        logger.info(f"USB reader thread started (ser2net endpoint {self.usb_url})")
-        while not self._stop.is_set():
-            pkt = read_usb(self.usb_url, self.parameters_data)
-            now = time.time()
-            if pkt:
-                with self._lock:
-                    self._latest = pkt
-                    self._latest_ts = now
-            time.sleep(self.poll_interval_sec)
+        logger.info(f"USB reader thread started (ser2net endpoint {self.source})")
+        while not self.stop_event.is_set():
+            if not self._ensure_connected():
+                self.stop_event.wait(self._retry_delay)
+                continue
+
+            try:
+                if hasattr(self._device.link, "settimeout"):
+                    self._device.link.settimeout(self.timeout)
+                payload = self._device.get_current_data_as_json() or {}
+                filtered = filter_payload(self.parameters_map, payload)
+                if filtered:
+                    with self._lock:
+                        self._latest = filtered
+                        self._latest_ts = time.time()
+                        self._latest_seq += 1
+            except Exception as e:
+                logger.warning(f"USB stream read error, reconnecting: {e}")
+                self._close_device()
+                self.stop_event.wait(self._retry_delay)
+                continue
+
+            self.stop_event.wait(self.poll_interval_sec)
+
+        self._close_device()
         logger.info("USB reader thread stopped")
 
 
@@ -290,8 +383,11 @@ class USBReaderThread(threading.Thread):
 # AirLink
 # ---------------------------------------------------------------------
 def get_airlink_id(config_data) -> str:
+    broker = config_data.get("mqttBroker")
+    if not broker:
+        return ""
     device_name = config_data["uuid"]
-    url = f"http://{config_data['mqttBroker']}:8088/get_airlink/{device_name}"
+    url = f"http://{broker}:8088/get_airlink/{device_name}"
     try:
         r = requests.get(url, timeout=3)
         if r.status_code == 200:
@@ -357,28 +453,47 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         logger.error(f"Flush on connect failed: {e}")
 
 
-def on_disconnect(client, userdata, reason_code, properties=None):
+def on_disconnect(client, userdata, *args):
     global mqtt_online
     mqtt_online = False
-    logger.warning(f"MQTT disconnected (reason={reason_code}). Will auto-reconnect.")
+    logger.warning("MQTT disconnected. Will auto-reconnect.")
 
 
-def on_publish(client, userdata, mid, reason_code, properties):
+def on_publish(client, userdata, mid, *args):
     logger.debug(f"MQTT published mid={mid}")
 
 
-def build_mqtt_client(config_data) -> mqtt.Client:
+def build_mqtt_client(mqtt_cfg: dict, timeout: float) -> mqtt.Client:
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    mqttc.username_pw_set(username=config_data["mqttUser"], password=config_data["mqttPass"])
+    if mqtt_cfg.get("username"):
+        mqttc.username_pw_set(username=mqtt_cfg["username"], password=mqtt_cfg.get("password"))
 
     mqttc.on_connect = on_connect
     mqttc.on_disconnect = on_disconnect
     mqttc.on_publish = on_publish
 
     mqttc.reconnect_delay_set(min_delay=1, max_delay=30)
-    mqttc.connect(config_data["mqttBroker"], config_data["mqttPort"], config_data["timeout"])
+    mqttc.connect(mqtt_cfg["host"], int(mqtt_cfg["port"]), int(mqtt_cfg.get("keepalive", timeout)))
     mqttc.loop_start()
     return mqttc
+
+
+def install_signal_handlers(stop_event):
+    previous = {}
+
+    def _handle_signal(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down...")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous[sig] = signal.getsignal(sig)
+        signal.signal(sig, _handle_signal)
+    return previous
+
+
+def restore_signal_handlers(previous):
+    for sig, handler in previous.items():
+        signal.signal(sig, handler)
 
 
 # ---------------------------------------------------------------------
@@ -389,23 +504,22 @@ def main():
 
     logger.info("Starting VantagePro2 publisher")
 
-    with open("parameters.json", "r") as f:
-        parameters_data = json.load(f)
+    config_data = load_json_file(Path("config.json"))
+    parameters_data = load_parameters_map(Path("parameters.json"))
+    cfg = normalize_config(config_data)
 
-    with open("config.json", "r") as f:
-        config_data = json.load(f)
-
-    device_name = config_data["uuid"]
+    device_name = cfg["station_uuid"]
     logger.info(f"Device/Topic = {device_name}")
 
-    Path(config_data["pathStorage"]).mkdir(parents=True, exist_ok=True)
+    if cfg["pathStorage"]:
+        Path(cfg["pathStorage"]).mkdir(parents=True, exist_ok=True)
 
     # Offline buffer DB stored alongside CSV root
-    db_path = str(Path(config_data["pathStorage"]) / "mqtt_offline_queue.sqlite")
+    db_path = str(cfg["spool_path"])
     offline_queue = OfflineQueueSQLite(
         db_path=db_path,
-        max_messages=config_data.get("offlineMaxMessages", 200000),
-        max_age_sec=config_data.get("offlineMaxAgeSec", 7 * 86400),
+        max_messages=cfg["offline_max_messages"],
+        max_age_sec=cfg["offline_max_age_sec"],
     )
     logger.info(f"Offline MQTT queue DB: {db_path} (size={offline_queue.size()})")
 
@@ -417,34 +531,44 @@ def main():
         logger.info("AirLink not available for this device")
 
     # MQTT
-    mqttc = build_mqtt_client(config_data)
-    logger.info("MQTT client started")
+    mqtt_cfg = cfg["mqtt"]
+    mqtt_enabled = is_mqtt_config_complete(mqtt_cfg)
+    mqttc = None
+    if mqtt_enabled:
+        mqttc = build_mqtt_client(mqtt_cfg, cfg["timeout"])
+        logger.info("MQTT client started")
+    else:
+        logger.warning("MQTT disabled: missing mqttBroker or mqttPort in config.json")
 
-    # ser2net endpoint
-    usb_url = f"tcp:127.0.0.1:{config_data['usbPort']}"
-    logger.info(f"Using ser2net endpoint: {usb_url}")
+    logger.info(f"Using ser2net endpoint: {cfg['source']}")
 
     # Start USB reader thread
+    stop_event = threading.Event()
+    previous_handlers = install_signal_handlers(stop_event)
     usb_thread = USBReaderThread(
-        usb_url=usb_url,
-        parameters_data=parameters_data,
-        poll_interval_sec=float(config_data.get("usbPollInterval", 1.0)),
+        source=cfg["source"],
+        timeout=cfg["timeout"],
+        parameters_map=parameters_data,
+        stop_event=stop_event,
+        poll_interval_sec=cfg["usb_poll_interval"],
     )
     usb_thread.start()
 
     # AirLink cache
     last_airlink_data = None
     last_airlink_time = 0.0
-    AIRLINK_INTERVAL = int(config_data.get("airlinkIntervalSec", 300))
+    AIRLINK_INTERVAL = cfg["airlink_interval_sec"]
 
     # MQTT publish QoS (0/1)
-    QOS = int(config_data.get("mqttQos", 1))
+    QOS = int(mqtt_cfg.get("qos", 1))
+    last_seq = -1
 
     try:
-        while True:
-            pkt, pkt_ts = usb_thread.get_latest()
+        while not stop_event.is_set():
+            pkt, pkt_ts, pkt_seq = usb_thread.get_latest()
 
-            if pkt:
+            if pkt and pkt_seq != last_seq:
+                last_seq = pkt_seq
                 # Preserve station datetime if present
                 if "Datetime" in pkt:
                     pkt["DatetimeWS"] = pkt["Datetime"]
@@ -453,11 +577,9 @@ def main():
                 pkt["Datetime"] = utc_now_iso()
 
                 # Add station metadata (your config keys)
-                # pkt["latitude"] = config_data["lat"]
-                # pkt["longitude"] = config_data["lon"]
-                position = {'latitude': config_data["lat"], 'longitude': config_data["lon"]}
+                position = {'latitude': cfg["latitude"], 'longitude': cfg["longitude"]}
                 pkt["position"] = position
-                pkt["name"] = config_data["name"]
+                pkt["name"] = cfg["name"]
 
 
                 # AirLink cached update
@@ -473,26 +595,36 @@ def main():
                     pkt.update(last_airlink_data)
 
                 # Persist CSV
-                save_data_to_csv(config_data, pkt)
+                save_data_to_csv(cfg, pkt)
+
+                # Build GeoJSON payload (same format used in PyVantagePro examples/14_stream.py)
+                geojson_point = build_geojson_point(
+                    pkt,
+                    cfg["station_uuid"],
+                    cfg["name"],
+                    cfg["latitude"],
+                    cfg["longitude"],
+                )
 
                 # Publish with store-and-forward
                 topic = device_name
-                payload = json.dumps(pkt, default=datetime_serializer)
+                payload = json.dumps(geojson_point, separators=(",", ":"), default=datetime_serializer)
                 
                 try:
-                    if mqtt_online:
+                    if mqtt_enabled and mqtt_online:
                         info = mqttc.publish(topic, payload, qos=QOS, retain=False)
                         if info.rc != mqtt.MQTT_ERR_SUCCESS:
                             logger.warning(f"Publish rc={info.rc}; enqueue offline")
                             offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
-                    else:
+                    elif mqtt_enabled:
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
                 except Exception as e:
                     logger.warning(f"Publish exception: {e}; enqueue offline")
-                    offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
+                    if mqtt_enabled:
+                        offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
 
                 # Opportunistic flush
-                if mqtt_online and offline_queue.size() > 0:
+                if mqtt_enabled and mqtt_online and offline_queue.size() > 0:
                     flush_offline_queue(mqttc, batch_size=200)
 
                 logger.info(f"Cycle OK: keys={len(pkt)} offline_q={offline_queue.size()}")
@@ -500,28 +632,30 @@ def main():
             else:
                 # No packet yet or USB read errors
                 age = time.time() - pkt_ts if pkt_ts else None
-                if age is None or age > max(5.0, float(config_data.get("delay", 5)) * 2):
+                if age is None or age > max(5.0, cfg["delay"] * 2):
                     logger.warning("No USB data available (station read pending or failing)")
 
-            time.sleep(float(config_data["delay"]))
+            stop_event.wait(cfg["delay"])
 
     except KeyboardInterrupt:
         logger.info("Shutdown requested (CTRL+C)")
+        stop_event.set()
 
     finally:
         try:
-            usb_thread.stop()
+            stop_event.set()
+            usb_thread.join(timeout=3.0)
         except Exception:
             pass
 
         try:
-            mqttc.disconnect()
+            if mqttc is not None:
+                mqttc.loop_stop()
+                mqttc.disconnect()
         except Exception:
             pass
-        try:
-            mqttc.loop_stop()
-        except Exception:
-            pass
+
+        restore_signal_handlers(previous_handlers)
 
         logger.info("Stopped")
 
