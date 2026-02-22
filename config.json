@@ -1,17 +1,25 @@
 {
-    "deviceName":"it.uniparthenope.meteo.ws2",
-    "devicePlace": "",
-    "deviceLong": 40.8564635,
-    "deviceLat": 14.2946362,
-    "folder": "data/",
-    "usbPort": 22222,
-    "delay": 10,
-    "timeout": 60,
+"uuid": "it.uniparthenope.meteo.ws1",
+"name": "Centro Direzionale",
+"lon": 14.2845,
+"lat": 40.8569,
 
-    "pathStorage": "/storage/vantage-pro/",
+"usbPort": 22222,
+"usbPollInterval": 1.0,
 
-    "mqttBroker": "193.205.230.7",
-    "mqttPort": 1883,
-    "mqttUser": "admin",
-    "mqttPass": "password"
+"delay": 10,
+"timeout": 60,
+
+"pathStorage": "/storage/vantage-pro/",
+
+"mqttBroker": "",
+"mqttPort": 1883,
+"mqttUser": "",
+"mqttPass": "",
+"mqttQos": 1,
+
+"offlineMaxMessages": 200000,
+"offlineMaxAgeSec": 604800,
+
+"airlinkIntervalSec": 300
 }
