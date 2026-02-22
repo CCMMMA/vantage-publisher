@@ -3,9 +3,11 @@ services:
   vantage-publisher:
     image: vantage-publisher
     volumes:
-      - ./config.json:/config/config.json
-      - ./parameters.json:/config/parameters.json
+      - ./config.json:/vantage-publisher/config.json
+      - ./parameters.json:/vantage-publisher/parameters.json
       - /storage:/storage/
+    environment:
+      - LOG_FILE=/var/log/vantage.log 
     network_mode: host
     restart: always
 
@@ -15,4 +17,3 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     command: >
       sh -c 'while :; do now=$$(date +"%H%M"); if [ "$now" = "1318" ]; then docker restart vantage-publisher; break; fi; sleep 60; done'
-
