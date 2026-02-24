@@ -147,8 +147,8 @@ MQTT topic is always `uuid`.
 flowchart LR
   A["Davis Vantage Pro2"] --> B["ser2net (TCP bridge)"]
   B --> C["vantage-publisher-threading.py"]
-  C -->|MQTT (flat/geojson)| D["MQTT Broker (optional)"]
-  C -->|Signal K deltas via WS (--signalk)| E["Signal K Server /signalk/v1/stream"]
+  C -->|"MQTT flat or geojson"| D["MQTT Broker (optional)"]
+  C -->|"Signal K delta via WS with --signalk"| E["Signal K Server signalk v1 stream"]
 ```
 
 ### Dataflow
