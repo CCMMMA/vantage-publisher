@@ -280,6 +280,50 @@ SIGNALK_STANDARD_PATHS = {
 }
 
 
+class SignalKWebsocketPublisher:
+    """Best-effort Signal K stream publisher over websocket."""
+
+    def __init__(self, server_url: str, token: str = "", timeout: float = 10.0):
+        self.server_url = str(server_url).strip()
+        self.token = str(token or "").strip()
+        self.timeout = float(timeout)
+        self._ws = None
+
+    def _build_url(self) -> str:
+        if not self.token:
+            return self.server_url
+        sep = "&" if "?" in self.server_url else "?"
+        return f"{self.server_url}{sep}token={self.token}"
+
+    def _connect(self):
+        if self._ws is not None:
+            return
+        try:
+            from websocket import create_connection  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "Missing dependency websocket-client. Install with: python3 -m pip install websocket-client"
+            ) from e
+        self._ws = create_connection(self._build_url(), timeout=self.timeout)
+
+    def publish(self, packet_json: str):
+        try:
+            self._connect()
+            self._ws.send(packet_json)
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        if self._ws is None:
+            return
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+        self._ws = None
+
+
 def convert_signalk_value(key: str, value):
     if value is None:
         return None
@@ -294,7 +338,14 @@ def convert_signalk_value(key: str, value):
     return value
 
 
-def build_signalk_update(payload: dict, station_uuid: str, latitude: float, longitude: float):
+def build_signalk_update(
+    payload: dict,
+    station_uuid: str,
+    latitude: float,
+    longitude: float,
+    signalk_context: str,
+    signalk_path_map: dict,
+):
     values = [
         {
             "path": "navigation.position",
@@ -303,9 +354,12 @@ def build_signalk_update(payload: dict, station_uuid: str, latitude: float, long
     ]
 
     for key, raw in payload.items():
-        if key in ("position", "name", "uuid"):
+        if key in ("position", "name", "uuid", "Datetime", "DatetimeWS"):
             continue
-        path = SIGNALK_STANDARD_PATHS.get(key, f"environment.{sanitize_signalk_key(key)}")
+        mapped = signalk_path_map.get(key)
+        path = str(mapped).strip() if mapped else SIGNALK_STANDARD_PATHS.get(
+            key, f"environment.{sanitize_signalk_key(key)}"
+        )
         try:
             value = convert_signalk_value(key, raw)
         except Exception:
@@ -315,7 +369,7 @@ def build_signalk_update(payload: dict, station_uuid: str, latitude: float, long
         values.append({"path": path, "value": value})
 
     return {
-        "context": f"meteo.{station_uuid}",
+        "context": signalk_context or f"meteo.{station_uuid}",
         "updates": [
             {
                 "timestamp": payload.get("Datetime", utc_now_iso()),
@@ -340,6 +394,8 @@ def build_mqtt_packet(mqtt_format: str, payload: dict, cfg: dict) -> dict:
             cfg["station_uuid"],
             cfg["latitude"],
             cfg["longitude"],
+            cfg["signalk_context"],
+            cfg["signalk_path_map"],
         )
     return dict(payload)
 
@@ -353,11 +409,16 @@ def normalize_config(cfg: dict) -> dict:
     root = Path(cfg["pathStorage"]) if cfg.get("pathStorage") else None
     source = f"tcp:127.0.0.1:{int(cfg.get('usbPort', 22222))}"
     timeout = float(cfg.get("timeout", 10))
+    station_uuid = str(cfg["uuid"])
+    signalk_path_map_raw = cfg.get("signalkPathMap", {})
+    signalk_path_map = {}
+    if isinstance(signalk_path_map_raw, dict):
+        signalk_path_map = {str(k): str(v) for k, v in signalk_path_map_raw.items() if v}
 
     return {
         "raw": cfg,
         "source": source,
-        "station_uuid": str(cfg["uuid"]),
+        "station_uuid": station_uuid,
         "name": str(cfg["name"]),
         "latitude": float(cfg["lat"]),
         "longitude": float(cfg["lon"]),
@@ -379,6 +440,10 @@ def normalize_config(cfg: dict) -> dict:
         "offline_max_age_sec": int(cfg.get("offlineMaxAgeSec", 7 * 86400)),
         "airlink_interval_sec": int(cfg.get("airlinkIntervalSec", 300)),
         "mqtt_format": normalize_mqtt_format(cfg.get("mqttFormat")),
+        "signalk_server_url": str(cfg.get("signalkServerUrl", "") or "").strip(),
+        "signalk_token": str(cfg.get("signalkToken", "") or "").strip(),
+        "signalk_context": str(cfg.get("signalkContext", f"meteo.{station_uuid}") or f"meteo.{station_uuid}"),
+        "signalk_path_map": signalk_path_map,
         "spool_path": Path(
             cfg.get(
                 "mqttSpoolFile",
@@ -627,8 +692,15 @@ def main():
     # MQTT
     mqtt_cfg = cfg["mqtt"]
     mqtt_enabled = is_mqtt_config_complete(mqtt_cfg)
+    signalk_direct_enabled = cfg["mqtt_format"] == "signalk" and bool(cfg["signalk_server_url"])
+    signalk_ws = None
     mqttc = None
-    if mqtt_enabled:
+    if signalk_direct_enabled:
+        signalk_ws = SignalKWebsocketPublisher(
+            cfg["signalk_server_url"], cfg["signalk_token"], timeout=cfg["timeout"]
+        )
+        logger.info(f"Signal K direct mode enabled ({cfg['signalk_server_url']})")
+    elif mqtt_enabled:
         mqttc = build_mqtt_client(mqtt_cfg, cfg["timeout"])
         logger.info("MQTT client started")
     else:
@@ -699,7 +771,9 @@ def main():
                 payload = json.dumps(packet, separators=(",", ":"), default=datetime_serializer)
                 
                 try:
-                    if mqtt_enabled and mqtt_online:
+                    if signalk_direct_enabled:
+                        signalk_ws.publish(payload)
+                    elif mqtt_enabled and mqtt_online:
                         info = mqttc.publish(topic, payload, qos=QOS, retain=False)
                         if info.rc != mqtt.MQTT_ERR_SUCCESS:
                             logger.warning(f"Publish rc={info.rc}; enqueue offline")
@@ -712,7 +786,7 @@ def main():
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
 
                 # Opportunistic flush
-                if mqtt_enabled and mqtt_online and offline_queue.size() > 0:
+                if (not signalk_direct_enabled) and mqtt_enabled and mqtt_online and offline_queue.size() > 0:
                     flush_offline_queue(mqttc, batch_size=200)
 
                 logger.info(f"Cycle OK: keys={len(pkt)} offline_q={offline_queue.size()}")
@@ -740,6 +814,11 @@ def main():
             if mqttc is not None:
                 mqttc.loop_stop()
                 mqttc.disconnect()
+        except Exception:
+            pass
+        try:
+            if signalk_ws is not None:
+                signalk_ws.close()
         except Exception:
             pass
 

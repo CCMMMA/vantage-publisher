@@ -18,6 +18,10 @@
 "mqttPass": "",
 "mqttQos": 1,
 "mqttFormat": "flat",
+"signalkServerUrl": "",
+"signalkToken": "",
+"signalkContext": "meteo.it.uniparthenope.meteo.ws1",
+"signalkPathMap": {},
 
 "offlineMaxMessages": 200000,
 "offlineMaxAgeSec": 604800,

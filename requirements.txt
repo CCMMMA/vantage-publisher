@@ -1,3 +1,4 @@
 git+https://github.com/ccmmma/PyVantagePro.git
 paho-mqtt
 requests
+websocket-client
