@@ -17,6 +17,7 @@
 "mqttUser": "",
 "mqttPass": "",
 "mqttQos": 1,
+"mqttFormat": "flat",
 
 "offlineMaxMessages": 200000,
 "offlineMaxAgeSec": 604800,

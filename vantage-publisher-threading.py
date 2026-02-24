@@ -9,6 +9,7 @@ import threading
 import logging
 import sqlite3
 import signal
+import math
 from contextlib import closing
 from pathlib import Path
 from datetime import datetime
@@ -251,6 +252,98 @@ def build_geojson_point(payload, station_uuid, name, latitude, longitude):
     }
 
 
+def normalize_mqtt_format(value) -> str:
+    fmt = str(value or "").strip().lower()
+    if fmt in ("geojson", "signalk", "flat"):
+        return fmt
+    return "flat"
+
+
+def sanitize_signalk_key(key: str) -> str:
+    out = []
+    for ch in str(key):
+        if ch.isalnum() or ch == "_":
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out) or "unknown"
+
+
+SIGNALK_STANDARD_PATHS = {
+    "TempOut": "environment.outside.temperature",
+    "HumOut": "environment.outside.humidity",
+    "Barometer": "environment.outside.pressure",
+    "WindSpeed": "environment.wind.speedApparent",
+    "WindDir": "environment.wind.angleApparent",
+    "TempIn": "environment.inside.temperature",
+    "HumIn": "environment.inside.humidity",
+}
+
+
+def convert_signalk_value(key: str, value):
+    if value is None:
+        return None
+    if key in ("TempOut", "TempIn"):
+        return float(value) + 273.15
+    if key == "Barometer":
+        return float(value) * 100.0
+    if key in ("HumOut", "HumIn"):
+        return float(value) / 100.0
+    if key == "WindDir":
+        return math.radians(float(value))
+    return value
+
+
+def build_signalk_update(payload: dict, station_uuid: str, latitude: float, longitude: float):
+    values = [
+        {
+            "path": "navigation.position",
+            "value": {"latitude": float(latitude), "longitude": float(longitude)},
+        }
+    ]
+
+    for key, raw in payload.items():
+        if key in ("position", "name", "uuid"):
+            continue
+        path = SIGNALK_STANDARD_PATHS.get(key, f"environment.{sanitize_signalk_key(key)}")
+        try:
+            value = convert_signalk_value(key, raw)
+        except Exception:
+            value = raw
+        if value is None:
+            continue
+        values.append({"path": path, "value": value})
+
+    return {
+        "context": f"meteo.{station_uuid}",
+        "updates": [
+            {
+                "timestamp": payload.get("Datetime", utc_now_iso()),
+                "values": values,
+            }
+        ],
+    }
+
+
+def build_mqtt_packet(mqtt_format: str, payload: dict, cfg: dict) -> dict:
+    if mqtt_format == "geojson":
+        return build_geojson_point(
+            payload,
+            cfg["station_uuid"],
+            cfg["name"],
+            cfg["latitude"],
+            cfg["longitude"],
+        )
+    if mqtt_format == "signalk":
+        return build_signalk_update(
+            payload,
+            cfg["station_uuid"],
+            cfg["latitude"],
+            cfg["longitude"],
+        )
+    return dict(payload)
+
+
 def normalize_config(cfg: dict) -> dict:
     required = ("uuid", "name", "lat", "lon")
     for key in required:
@@ -285,6 +378,7 @@ def normalize_config(cfg: dict) -> dict:
         "offline_max_messages": int(cfg.get("offlineMaxMessages", 200000)),
         "offline_max_age_sec": int(cfg.get("offlineMaxAgeSec", 7 * 86400)),
         "airlink_interval_sec": int(cfg.get("airlinkIntervalSec", 300)),
+        "mqtt_format": normalize_mqtt_format(cfg.get("mqttFormat")),
         "spool_path": Path(
             cfg.get(
                 "mqttSpoolFile",
@@ -539,6 +633,7 @@ def main():
         logger.info("MQTT client started")
     else:
         logger.warning("MQTT disabled: missing mqttBroker or mqttPort in config.json")
+    logger.info(f"MQTT payload format: {cfg['mqtt_format']}")
 
     logger.info(f"Using ser2net endpoint: {cfg['source']}")
 
@@ -597,18 +692,11 @@ def main():
                 # Persist CSV
                 save_data_to_csv(cfg, pkt)
 
-                # Build GeoJSON payload (same format used in PyVantagePro examples/14_stream.py)
-                geojson_point = build_geojson_point(
-                    pkt,
-                    cfg["station_uuid"],
-                    cfg["name"],
-                    cfg["latitude"],
-                    cfg["longitude"],
-                )
+                packet = build_mqtt_packet(cfg["mqtt_format"], pkt, cfg)
 
                 # Publish with store-and-forward
                 topic = device_name
-                payload = json.dumps(geojson_point, separators=(",", ":"), default=datetime_serializer)
+                payload = json.dumps(packet, separators=(",", ":"), default=datetime_serializer)
                 
                 try:
                     if mqtt_enabled and mqtt_online:

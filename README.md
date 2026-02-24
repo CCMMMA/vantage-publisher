@@ -10,7 +10,7 @@ The threaded publisher (`vantage-publisher-threading.py`) is aligned with the ne
 - Per-sample field filtering through `parameters.json`
 - CSV persistence under `pathStorage/YYYY/MM/YYYY-MM-DD.csv`
 - MQTT publishing with offline store-and-forward (SQLite queue)
-- GeoJSON MQTT payloads (`Feature` with `Point` geometry)
+- Selectable MQTT payload format: `flat`, `geojson`, `signalk`
 - Optional AirLink merge (cached on interval)
 - Graceful shutdown on `SIGINT`/`SIGTERM`
 
@@ -46,6 +46,7 @@ python3 -m pip install -r requirements.txt
   "mqttUser": "",
   "mqttPass": "",
   "mqttQos": 1,
+  "mqttFormat": "flat",
   "offlineMaxMessages": 200000,
   "offlineMaxAgeSec": 604800,
   "airlinkIntervalSec": 300
@@ -57,6 +58,7 @@ Optional additional keys:
 - `mqttKeepalive` (default `30`)
 - `mqttReconnectSleep` (default `1.0`)
 - `mqttSpoolFile` (default `<pathStorage>/mqtt_offline_queue.sqlite`)
+- `mqttFormat`: `flat` (default), `geojson`, `signalk`
 
 ### `parameters.json`
 
@@ -73,9 +75,25 @@ If the file is missing, all fields are included.
 python3 vantage-publisher-threading.py
 ```
 
-## MQTT payload format
+## MQTT payload formats
 
-Published payloads are GeoJSON Features:
+### `flat` (default)
+
+Legacy payload, same shape as the historical publisher:
+
+```json
+{
+  "Datetime": "2026-02-24T10:15:40Z",
+  "TempOut": 12.7,
+  "WindSpeed": 3,
+  "position": { "latitude": 40.8569, "longitude": 14.2845 },
+  "name": "Centro Direzionale"
+}
+```
+
+### `geojson`
+
+Payload as GeoJSON `Feature`:
 
 ```json
 {
@@ -94,7 +112,37 @@ Published payloads are GeoJSON Features:
 }
 ```
 
-Topic: `uuid` from `config.json`.
+### `signalk`
+
+Payload as Signal K update:
+
+```json
+{
+  "context": "meteo.it.uniparthenope.meteo.ws1",
+  "updates": [
+    {
+      "timestamp": "2026-02-24T10:15:40Z",
+      "values": [
+        {
+          "path": "navigation.position",
+          "value": { "latitude": 40.8569, "longitude": 14.2845 }
+        },
+        { "path": "environment.outside.temperature", "value": 285.85 },
+        { "path": "environment.wind.speedApparent", "value": 3 }
+      ]
+    }
+  ]
+}
+```
+
+Signal K mapping behavior:
+
+- context: `meteo.<uuid>`
+- `navigation.position`: station latitude/longitude
+- standard paths are used when mapped (for example: `TempOut`, `HumOut`, `Barometer`, `WindSpeed`, `WindDir`, `TempIn`, `HumIn`)
+- all other keys fallback to `environment.<key>`
+
+Topic is always `uuid` from `config.json`.
 
 ## Storage layout
 
