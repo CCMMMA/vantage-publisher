@@ -1,22 +1,21 @@
 # Vantage Publisher
 
-`vantage-publisher` reads live data from a Davis Vantage Pro2 console (via `ser2net` TCP), stores samples to CSV, publishes to MQTT, and can also publish directly to a Signal K server over websocket.
+`vantage-publisher-threading.py` reads live data from a Davis Vantage Pro2 console, optionally stores CSV rows locally, optionally publishes MQTT packets, and optionally sends Signal K deltas via websocket.
 
 ## Features
 
-- Persistent station stream with automatic reconnect
-- Per-sample field filtering via `parameters.json`
-- CSV persistence under `pathStorage/YYYY/MM/YYYY-MM-DD.csv`
-- MQTT publishing with offline store-and-forward (SQLite queue)
-- Optional direct Signal K websocket publishing (`--signalk`)
-- Optional AirLink merge (cached on interval)
+- Continuous station stream with reconnect
+- Parameter filtering via `parameters.json`
+- Optional local CSV storage
+- Optional MQTT publishing with offline queue
+- Optional direct Signal K websocket publishing
+- Dry run mode for configuration/debug checks
+- Built-in HTTP server for browsing stored CSV files (optional basic auth)
 
 ## Requirements
 
 - Python 3.8+
-- Access to a Vantage Pro2 console exposed as `tcp:127.0.0.1:<usbPort>` (typically through `ser2net`)
-- Optional MQTT broker
-- Optional Signal K server (for `--signalk`)
+- Vantage Pro2 reachable as `tcp:127.0.0.1:<usbPort>` (typically through `ser2net`)
 
 Install dependencies:
 
@@ -24,9 +23,7 @@ Install dependencies:
 python3 -m pip install -r requirements.txt
 ```
 
-## Configuration
-
-### `config.json`
+## Configuration (`config.json`)
 
 ```json
 {
@@ -34,79 +31,127 @@ python3 -m pip install -r requirements.txt
   "name": "Centro Direzionale",
   "lon": 14.2845,
   "lat": 40.8569,
+
+  "storage": true,
+  "mqtt": false,
+  "signalk": false,
+
   "usbPort": 22222,
   "usbPollInterval": 1.0,
   "delay": 10,
   "timeout": 60,
+
   "pathStorage": "/storage/vantage-pro/",
+
   "mqttBroker": "mqtt-broker.local",
   "mqttPort": 1883,
   "mqttUser": "",
   "mqttPass": "",
   "mqttQos": 1,
   "mqttFormat": "flat",
+
   "signalkServerUrl": "ws://signalk.local:3000/signalk/v1/stream",
   "signalkToken": "",
   "signalkContext": "meteo.it.uniparthenope.meteo.ws1",
   "signalkPathMap": {},
+
+  "httpEnabled": false,
+  "httpHost": "0.0.0.0",
+  "httpPort": 8080,
+  "httpUser": "",
+  "httpPass": "",
+  "httpRoot": "/storage/vantage-pro/",
+
   "offlineMaxMessages": 200000,
   "offlineMaxAgeSec": 604800,
   "airlinkIntervalSec": 300
 }
 ```
 
-Optional keys:
+### Key runtime booleans
 
-- `mqttFormat`: `flat` (default) or `geojson`
-- `mqttKeepalive` (default `30`)
-- `mqttReconnectSleep` (default `1.0`)
-- `mqttSpoolFile` (default `<pathStorage>/mqtt_offline_queue.sqlite`)
-- `signalkServerUrl`: websocket endpoint, usually `ws://<host>:3000/signalk/v1/stream`
-- `signalkToken`: optional token for authenticated Signal K websocket
-- `signalkContext`: delta context (default `meteo.<uuid>`)
-- `signalkPathMap`: explicit field-to-path map for Signal K deltas (`{ "<field>": "<signalk.path>" }`)
+- `storage`: enable/disable local CSV storage (default: `true`)
+- `mqtt`: enable/disable MQTT publishing (default: `false`)
+- `signalk`: enable/disable Signal K websocket publishing (default: `false`)
 
-### `parameters.json`
+`mqttFormat` supports:
 
-Map each field name to boolean:
+- `flat` (default/fallback)
+- `geojson`
+
+## Parameters file (`parameters.json`)
+
+Boolean map of station fields:
 
 - `true`: include field
 - `false`: exclude field
 
-If missing, all fields are included.
+If file is missing, all fields are included.
 
-## Command line parameters
+## Command line options
 
-The script supports:
+- `--config <path>` config file path (default `config.json`)
+- `--parameters <path>` parameters file path (default `parameters.json`)
+- `--signalk true|false` override config `signalk`
+- `--mqtt true|false` override config `mqtt`
+- `--storage true|false` override config `storage`
+- `--dry` dry mode (no storage, no MQTT/Signal K/http connections; packets/rows logged only)
 
-- `--config <path>`: config file path (default `config.json`)
-- `--parameters <path>`: parameters file path (default `parameters.json`)
-- `--signalk`: enable direct Signal K websocket publishing
-
-Examples:
+### Usage examples
 
 ```bash
-# CSV + MQTT only
+# Use config defaults
 python3 vantage-publisher-threading.py
 
-# CSV + MQTT + direct Signal K
-python3 vantage-publisher-threading.py --signalk
+# Enable MQTT and storage explicitly
+python3 vantage-publisher-threading.py --mqtt true --storage true
 
-# Custom config files + Signal K
+# Enable Signal K direct websocket together with MQTT and storage
+python3 vantage-publisher-threading.py --signalk true --mqtt true --storage true
+
+# Dry mode validation (no publish/store/connect)
+python3 vantage-publisher-threading.py --dry
+
+# Custom config + parameters
 python3 vantage-publisher-threading.py \
   --config /etc/vantage/config.json \
-  --parameters /etc/vantage/parameters.json \
-  --signalk
+  --parameters /etc/vantage/parameters.json
 ```
 
-Important:
+## Dry mode behavior
 
-- `--signalk` requires `signalkServerUrl` in `config.json`.
-- CSV storage, MQTT publishing, and Signal K websocket publishing can run together.
+When `--dry` is active:
 
-## MQTT payload formats
+- MQTT connection/publish is disabled
+- Signal K websocket connection/publish is disabled
+- local CSV writes are disabled
+- HTTP storage server is disabled
+- generated outputs are logged:
+  - `CSV_ROW;...`
+  - `MQTT_PACKET;...`
+  - `SIGNALK_UPDATE;...`
 
-### `flat` (default)
+## HTTP server for local storage
+
+If `httpEnabled` is `true`, the app starts an HTTP server exposing `httpRoot`.
+
+Configuration keys:
+
+- `httpEnabled` (`true|false`)
+- `httpHost` (default `0.0.0.0`)
+- `httpPort` (default `8080`)
+- `httpRoot` directory to serve (default `pathStorage`)
+- `httpUser` optional basic auth username
+- `httpPass` optional basic auth password
+
+Authentication behavior:
+
+- if `httpUser` is empty, no authentication is required
+- if `httpUser` is set, HTTP Basic Auth is required
+
+## MQTT payloads
+
+### `flat`
 
 ```json
 {
@@ -128,9 +173,8 @@ Important:
     "coordinates": [14.2845, 40.8569]
   },
   "properties": {
-    "Datetime": "2026-02-22T22:15:40Z",
+    "Datetime": "2026-02-24T10:15:40Z",
     "TempOut": 12.7,
-    "WindSpeed": 3,
     "uuid": "it.uniparthenope.meteo.ws1",
     "name": "Centro Direzionale"
   }
@@ -139,84 +183,21 @@ Important:
 
 MQTT topic is always `uuid`.
 
-## Direct Signal K integration (without sensor-network-collector)
+## Signal K deltas
 
-### Architecture
+When Signal K is enabled (`signalk=true` or `--signalk true`), the publisher sends deltas with:
 
-```mermaid
-flowchart LR
-  A["Davis Vantage Pro2"] --> B["ser2net (TCP bridge)"]
-  B --> C["vantage-publisher-threading.py"]
-  C -->|"MQTT flat or geojson"| D["MQTT Broker (optional)"]
-  C -->|"Signal K delta via WS with --signalk"| E["Signal K Server signalk v1 stream"]
-```
-
-### Dataflow
-
-1. Publisher reads and filters station data.
-2. Publisher writes CSV samples to local storage.
-3. Publisher publishes MQTT payload (`flat` or `geojson`) if MQTT is configured.
-4. If `--signalk` is set, publisher also sends Signal K delta updates via websocket:
-   - context: `signalkContext` (default `meteo.<uuid>`)
-   - fixed position path: `navigation.position`
-   - other values: from `signalkPathMap`, otherwise standard mapping, otherwise `environment.<field>`
-
-### Recommended config for direct Signal K
-
-```json
-{
-  "uuid": "it.uniparthenope.meteo.ws1",
-  "name": "Centro Direzionale",
-  "lon": 14.2845,
-  "lat": 40.8569,
-  "usbPort": 22222,
-  "usbPollInterval": 1.0,
-  "delay": 10,
-  "timeout": 60,
-  "pathStorage": "/storage/vantage-pro/",
-  "mqttBroker": "mqtt-broker.local",
-  "mqttPort": 1883,
-  "mqttUser": "",
-  "mqttPass": "",
-  "mqttQos": 1,
-  "mqttFormat": "geojson",
-  "signalkServerUrl": "ws://signalk.local:3000/signalk/v1/stream",
-  "signalkToken": "OPTIONAL_TOKEN",
-  "signalkContext": "meteo.it.uniparthenope.meteo.ws1",
-  "signalkPathMap": {
-    "TempOut": "environment.outside.temperature",
-    "HumOut": "environment.outside.humidity",
-    "Barometer": "environment.outside.pressure",
-    "WindSpeed": "environment.wind.speedApparent",
-    "WindDir": "environment.wind.angleApparent",
-    "RainRate": "environment.rain.rate",
-    "SolarRad": "environment.outside.solar.irradiance"
-  },
-  "offlineMaxMessages": 200000,
-  "offlineMaxAgeSec": 604800,
-  "airlinkIntervalSec": 300
-}
-```
-
-Run:
-
-```bash
-python3 vantage-publisher-threading.py --signalk
-```
-
-## Integration with sensor-network-collector
-
-Best compatibility mode for collector is `mqttFormat: "geojson"`.
-
-- `geojson`: fully supported
-- `flat`: supported
-
-If you use collector + Signal K together, run publisher with `--signalk` and keep MQTT enabled.
+- `context`: `signalkContext` (default `meteo.<uuid>`)
+- `navigation.position`: station lat/lon
+- remaining fields:
+  - from `signalkPathMap` if present
+  - otherwise standard mappings for common weather keys
+  - otherwise fallback to `environment.<field>`
 
 ## Storage layout
 
-- CSV: `<pathStorage>/<YYYY>/<MM>/<YYYY-MM-DD>.csv`
-- MQTT offline queue: `<pathStorage>/mqtt_offline_queue.sqlite` (or `mqttSpoolFile`)
+- CSV files: `<pathStorage>/<YYYY>/<MM>/<YYYY-MM-DD>.csv`
+- MQTT offline queue DB: `<pathStorage>/mqtt_offline_queue.sqlite` (or `mqttSpoolFile`)
 
 ## License
 

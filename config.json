@@ -4,6 +4,10 @@
 "lon": 14.2845,
 "lat": 40.8569,
 
+"storage": true,
+"mqtt": false,
+"signalk": false,
+
 "usbPort": 22222,
 "usbPollInterval": 1.0,
 
@@ -22,6 +26,13 @@
 "signalkToken": "",
 "signalkContext": "meteo.it.uniparthenope.meteo.ws1",
 "signalkPathMap": {},
+
+"httpEnabled": false,
+"httpHost": "0.0.0.0",
+"httpPort": 8080,
+"httpUser": "",
+"httpPass": "",
+"httpRoot": "/storage/vantage-pro/",
 
 "offlineMaxMessages": 200000,
 "offlineMaxAgeSec": 604800,

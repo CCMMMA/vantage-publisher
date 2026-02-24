@@ -11,6 +11,9 @@ import sqlite3
 import signal
 import math
 import argparse
+import base64
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import closing
 from pathlib import Path
 from datetime import datetime
@@ -227,6 +230,36 @@ def load_parameters_map(path: Path):
     return {str(k): bool(v) for k, v in data.items()}
 
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        raise ValueError("boolean value is required")
+    txt = str(value).strip().lower()
+    if txt in ("1", "true", "yes", "on"):
+        return True
+    if txt in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"invalid boolean value: {value}")
+
+
+def parse_bool_arg(value):
+    try:
+        return parse_bool(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
+def get_cfg_bool(cfg: dict, key: str, default: bool) -> bool:
+    if key not in cfg:
+        return bool(default)
+    try:
+        return parse_bool(cfg.get(key))
+    except ValueError:
+        logger.warning(f"Invalid boolean value for '{key}', using default={default}")
+        return bool(default)
+
+
 def is_parameter_enabled(parameters_map, key: str) -> bool:
     if parameters_map is None:
         return True
@@ -325,6 +358,58 @@ class SignalKWebsocketPublisher:
         self._ws = None
 
 
+class StorageHTTPRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, directory=None, username="", password="", **kwargs):
+        self._auth_user = str(username or "")
+        self._auth_pass = str(password or "")
+        super().__init__(*args, directory=directory, **kwargs)
+
+    def _is_authorized(self) -> bool:
+        if not self._auth_user:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Basic "):
+            return False
+        expected = base64.b64encode(f"{self._auth_user}:{self._auth_pass}".encode("utf-8")).decode("ascii")
+        return auth[6:] == expected
+
+    def _send_auth_required(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="vantage-storage"')
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Authentication required")
+
+    def do_GET(self):
+        if not self._is_authorized():
+            self._send_auth_required()
+            return
+        super().do_GET()
+
+    def do_HEAD(self):
+        if not self._is_authorized():
+            self._send_auth_required()
+            return
+        super().do_HEAD()
+
+
+def start_storage_http_server(http_cfg: dict):
+    if not http_cfg.get("enabled"):
+        return None, None
+    root = Path(http_cfg["root"])
+    root.mkdir(parents=True, exist_ok=True)
+    handler = partial(
+        StorageHTTPRequestHandler,
+        directory=str(root),
+        username=http_cfg.get("username", ""),
+        password=http_cfg.get("password", ""),
+    )
+    server = ThreadingHTTPServer((http_cfg["host"], int(http_cfg["port"])), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
 def convert_signalk_value(key: str, value):
     if value is None:
         return None
@@ -406,6 +491,7 @@ def normalize_config(cfg: dict) -> dict:
     signalk_path_map = {}
     if isinstance(signalk_path_map_raw, dict):
         signalk_path_map = {str(k): str(v) for k, v in signalk_path_map_raw.items() if v}
+    storage_root = str(root) if root else ""
 
     return {
         "raw": cfg,
@@ -417,7 +503,10 @@ def normalize_config(cfg: dict) -> dict:
         "delay": float(cfg.get("delay", cfg.get("usbPollInterval", 2.0))),
         "usb_poll_interval": float(cfg.get("usbPollInterval", 1.0)),
         "timeout": timeout,
-        "pathStorage": str(root) if root else "",
+        "pathStorage": storage_root,
+        "storage_enabled": get_cfg_bool(cfg, "storage", True),
+        "mqtt_enabled": get_cfg_bool(cfg, "mqtt", False),
+        "signalk_enabled": get_cfg_bool(cfg, "signalk", False),
         "mqtt": {
             "host": cfg.get("mqttBroker"),
             "port": int(cfg.get("mqttPort", 1883)),
@@ -436,6 +525,14 @@ def normalize_config(cfg: dict) -> dict:
         "signalk_token": str(cfg.get("signalkToken", "") or "").strip(),
         "signalk_context": str(cfg.get("signalkContext", f"meteo.{station_uuid}") or f"meteo.{station_uuid}"),
         "signalk_path_map": signalk_path_map,
+        "http": {
+            "enabled": get_cfg_bool(cfg, "httpEnabled", False),
+            "host": str(cfg.get("httpHost", "0.0.0.0")),
+            "port": int(cfg.get("httpPort", 8080)),
+            "username": str(cfg.get("httpUser", "") or ""),
+            "password": str(cfg.get("httpPass", "") or ""),
+            "root": str(cfg.get("httpRoot", storage_root or ".")),
+        },
         "spool_path": Path(
             cfg.get(
                 "mqttSpoolFile",
@@ -663,8 +760,29 @@ def parse_args():
     )
     parser.add_argument(
         "--signalk",
+        type=parse_bool_arg,
+        default=None,
+        metavar="true|false",
+        help="Enable or disable direct Signal K websocket publishing",
+    )
+    parser.add_argument(
+        "--mqtt",
+        type=parse_bool_arg,
+        default=None,
+        metavar="true|false",
+        help="Enable or disable MQTT publishing",
+    )
+    parser.add_argument(
+        "--storage",
+        type=parse_bool_arg,
+        default=None,
+        metavar="true|false",
+        help="Enable or disable local CSV storage",
+    )
+    parser.add_argument(
+        "--dry",
         action="store_true",
-        help="Enable direct Signal K websocket publishing using signalkServerUrl/signalkToken from config",
+        help="Dry mode: no storage, no MQTT/SignalK/http connections; log generated packets/rows",
     )
     return parser.parse_args()
 
@@ -681,12 +799,25 @@ def main():
     config_data = load_json_file(Path(args.config))
     parameters_data = load_parameters_map(Path(args.parameters))
     cfg = normalize_config(config_data)
+    dry_mode = bool(args.dry)
 
     device_name = cfg["station_uuid"]
     logger.info(f"Device/Topic = {device_name}")
 
-    if cfg["pathStorage"]:
+    storage_enabled = cfg["storage_enabled"] if args.storage is None else args.storage
+    mqtt_enabled_cfg = cfg["mqtt_enabled"] if args.mqtt is None else args.mqtt
+    signalk_enabled_cfg = cfg["signalk_enabled"] if args.signalk is None else args.signalk
+
+    if dry_mode:
+        storage_enabled = False
+        mqtt_enabled_cfg = False
+        signalk_enabled_cfg = False
+        logger.info("Dry mode enabled: storage, MQTT, Signal K, and HTTP server connections are disabled")
+
+    if storage_enabled and cfg["pathStorage"]:
         Path(cfg["pathStorage"]).mkdir(parents=True, exist_ok=True)
+    elif storage_enabled:
+        logger.warning("Storage enabled but pathStorage is empty; CSV storage will be skipped")
 
     # Offline buffer DB stored alongside CSV root
     db_path = str(cfg["spool_path"])
@@ -698,36 +829,55 @@ def main():
     logger.info(f"Offline MQTT queue DB: {db_path} (size={offline_queue.size()})")
 
     # AirLink
-    airlink_id = get_airlink_id(config_data)
-    if airlink_id:
-        logger.info(f"AirLink enabled: {airlink_id}")
+    if dry_mode:
+        airlink_id = ""
+        logger.info("AirLink disabled in dry mode")
     else:
-        logger.info("AirLink not available for this device")
+        airlink_id = get_airlink_id(config_data)
+        if airlink_id:
+            logger.info(f"AirLink enabled: {airlink_id}")
+        else:
+            logger.info("AirLink not available for this device")
 
     # MQTT
     mqtt_cfg = cfg["mqtt"]
-    mqtt_enabled = is_mqtt_config_complete(mqtt_cfg)
-    signalk_direct_enabled = bool(args.signalk)
+    mqtt_runtime_enabled = mqtt_enabled_cfg and is_mqtt_config_complete(mqtt_cfg)
+    signalk_runtime_enabled = signalk_enabled_cfg and bool(cfg["signalk_server_url"])
+    if mqtt_enabled_cfg and not mqtt_runtime_enabled:
+        logger.warning("MQTT enabled but broker/port is invalid; MQTT runtime disabled")
+    if signalk_enabled_cfg and not signalk_runtime_enabled:
+        logger.warning("Signal K enabled but signalkServerUrl is empty; Signal K runtime disabled")
+
     signalk_ws = None
     mqttc = None
 
-    if mqtt_enabled:
+    if mqtt_runtime_enabled and not dry_mode:
         mqttc = build_mqtt_client(mqtt_cfg, cfg["timeout"])
         logger.info("MQTT client started")
     else:
-        logger.warning("MQTT disabled: missing mqttBroker or mqttPort in config.json")
+        logger.info("MQTT runtime disabled")
 
-    if signalk_direct_enabled:
-        if not cfg["signalk_server_url"]:
-            raise SystemExit(
-                "--signalk was requested but signalkServerUrl is empty in config"
-            )
+    if signalk_runtime_enabled and not dry_mode:
         signalk_ws = SignalKWebsocketPublisher(
             cfg["signalk_server_url"], cfg["signalk_token"], timeout=cfg["timeout"]
         )
         logger.info(f"Signal K direct mode enabled ({cfg['signalk_server_url']})")
     else:
-        logger.info("Signal K direct mode disabled")
+        logger.info("Signal K runtime disabled")
+
+    http_server = None
+    if cfg["http"]["enabled"] and not dry_mode:
+        if not storage_enabled and cfg["http"]["root"] == cfg["pathStorage"]:
+            logger.warning("HTTP server root uses pathStorage while storage is disabled")
+        try:
+            http_server, _ = start_storage_http_server(cfg["http"])
+            logger.info(
+                f"HTTP storage server started at http://{cfg['http']['host']}:{cfg['http']['port']}/ (root={cfg['http']['root']})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to start HTTP storage server: {e}")
+    elif cfg["http"]["enabled"]:
+        logger.info("HTTP storage server disabled in dry mode")
     logger.info(f"MQTT payload format: {cfg['mqtt_format']}")
 
     logger.info(f"Using ser2net endpoint: {cfg['source']}")
@@ -784,45 +934,51 @@ def main():
                 if last_airlink_data:
                     pkt.update(last_airlink_data)
 
-                # Persist CSV
-                save_data_to_csv(cfg, pkt)
-
                 packet = build_mqtt_packet(cfg["mqtt_format"], pkt, cfg)
+                signalk_packet = build_signalk_update(
+                    pkt,
+                    cfg["station_uuid"],
+                    cfg["latitude"],
+                    cfg["longitude"],
+                    cfg["signalk_context"],
+                    cfg["signalk_path_map"],
+                )
 
                 # Publish with store-and-forward
                 topic = device_name
                 payload = json.dumps(packet, separators=(",", ":"), default=datetime_serializer)
+                signalk_payload = json.dumps(signalk_packet, separators=(",", ":"), default=datetime_serializer)
+
+                if dry_mode:
+                    logger.info(f"CSV_ROW;{json.dumps(pkt, separators=(',', ':'))}")
+                    logger.info(f"MQTT_PACKET;{payload}")
+                    logger.info(f"SIGNALK_UPDATE;{signalk_payload}")
+                    continue
+
+                if storage_enabled:
+                    save_data_to_csv(cfg, pkt)
                 
                 try:
-                    if mqtt_enabled and mqtt_online:
+                    if mqtt_runtime_enabled and mqtt_online:
                         info = mqttc.publish(topic, payload, qos=QOS, retain=False)
                         if info.rc != mqtt.MQTT_ERR_SUCCESS:
                             logger.warning(f"Publish rc={info.rc}; enqueue offline")
                             offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
-                    elif mqtt_enabled:
+                    elif mqtt_runtime_enabled:
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
                 except Exception as e:
                     logger.warning(f"Publish exception: {e}; enqueue offline")
-                    if mqtt_enabled:
+                    if mqtt_runtime_enabled:
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
 
-                if signalk_direct_enabled:
-                    sk_packet = build_signalk_update(
-                        pkt,
-                        cfg["station_uuid"],
-                        cfg["latitude"],
-                        cfg["longitude"],
-                        cfg["signalk_context"],
-                        cfg["signalk_path_map"],
-                    )
-                    sk_payload = json.dumps(sk_packet, separators=(",", ":"), default=datetime_serializer)
+                if signalk_runtime_enabled:
                     try:
-                        signalk_ws.publish(sk_payload)
+                        signalk_ws.publish(signalk_payload)
                     except Exception as e:
                         logger.warning(f"Signal K websocket publish failed: {e}")
 
                 # Opportunistic MQTT flush
-                if mqtt_enabled and mqtt_online and offline_queue.size() > 0:
+                if mqtt_runtime_enabled and mqtt_online and offline_queue.size() > 0:
                     flush_offline_queue(mqttc, batch_size=200)
 
                 logger.info(f"Cycle OK: keys={len(pkt)} offline_q={offline_queue.size()}")
@@ -855,6 +1011,12 @@ def main():
         try:
             if signalk_ws is not None:
                 signalk_ws.close()
+        except Exception:
+            pass
+        try:
+            if http_server is not None:
+                http_server.shutdown()
+                http_server.server_close()
         except Exception:
             pass
 
