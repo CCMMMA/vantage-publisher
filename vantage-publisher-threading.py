@@ -10,6 +10,7 @@ import logging
 import sqlite3
 import signal
 import math
+import argparse
 from contextlib import closing
 from pathlib import Path
 from datetime import datetime
@@ -254,7 +255,7 @@ def build_geojson_point(payload, station_uuid, name, latitude, longitude):
 
 def normalize_mqtt_format(value) -> str:
     fmt = str(value or "").strip().lower()
-    if fmt in ("geojson", "signalk", "flat"):
+    if fmt in ("geojson", "flat"):
         return fmt
     return "flat"
 
@@ -387,15 +388,6 @@ def build_mqtt_packet(mqtt_format: str, payload: dict, cfg: dict) -> dict:
             cfg["name"],
             cfg["latitude"],
             cfg["longitude"],
-        )
-    if mqtt_format == "signalk":
-        return build_signalk_update(
-            payload,
-            cfg["station_uuid"],
-            cfg["latitude"],
-            cfg["longitude"],
-            cfg["signalk_context"],
-            cfg["signalk_path_map"],
         )
     return dict(payload)
 
@@ -655,6 +647,28 @@ def restore_signal_handlers(previous):
         signal.signal(sig, handler)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Threaded VantagePro2 publisher (CSV + MQTT + optional Signal K websocket)"
+    )
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Path to config JSON file (default: config.json)",
+    )
+    parser.add_argument(
+        "--parameters",
+        default="parameters.json",
+        help="Path to parameters JSON file (default: parameters.json)",
+    )
+    parser.add_argument(
+        "--signalk",
+        action="store_true",
+        help="Enable direct Signal K websocket publishing using signalkServerUrl/signalkToken from config",
+    )
+    return parser.parse_args()
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
@@ -662,9 +676,10 @@ def main():
     global offline_queue
 
     logger.info("Starting VantagePro2 publisher")
+    args = parse_args()
 
-    config_data = load_json_file(Path("config.json"))
-    parameters_data = load_parameters_map(Path("parameters.json"))
+    config_data = load_json_file(Path(args.config))
+    parameters_data = load_parameters_map(Path(args.parameters))
     cfg = normalize_config(config_data)
 
     device_name = cfg["station_uuid"]
@@ -692,19 +707,27 @@ def main():
     # MQTT
     mqtt_cfg = cfg["mqtt"]
     mqtt_enabled = is_mqtt_config_complete(mqtt_cfg)
-    signalk_direct_enabled = cfg["mqtt_format"] == "signalk" and bool(cfg["signalk_server_url"])
+    signalk_direct_enabled = bool(args.signalk)
     signalk_ws = None
     mqttc = None
-    if signalk_direct_enabled:
-        signalk_ws = SignalKWebsocketPublisher(
-            cfg["signalk_server_url"], cfg["signalk_token"], timeout=cfg["timeout"]
-        )
-        logger.info(f"Signal K direct mode enabled ({cfg['signalk_server_url']})")
-    elif mqtt_enabled:
+
+    if mqtt_enabled:
         mqttc = build_mqtt_client(mqtt_cfg, cfg["timeout"])
         logger.info("MQTT client started")
     else:
         logger.warning("MQTT disabled: missing mqttBroker or mqttPort in config.json")
+
+    if signalk_direct_enabled:
+        if not cfg["signalk_server_url"]:
+            raise SystemExit(
+                "--signalk was requested but signalkServerUrl is empty in config"
+            )
+        signalk_ws = SignalKWebsocketPublisher(
+            cfg["signalk_server_url"], cfg["signalk_token"], timeout=cfg["timeout"]
+        )
+        logger.info(f"Signal K direct mode enabled ({cfg['signalk_server_url']})")
+    else:
+        logger.info("Signal K direct mode disabled")
     logger.info(f"MQTT payload format: {cfg['mqtt_format']}")
 
     logger.info(f"Using ser2net endpoint: {cfg['source']}")
@@ -771,9 +794,7 @@ def main():
                 payload = json.dumps(packet, separators=(",", ":"), default=datetime_serializer)
                 
                 try:
-                    if signalk_direct_enabled:
-                        signalk_ws.publish(payload)
-                    elif mqtt_enabled and mqtt_online:
+                    if mqtt_enabled and mqtt_online:
                         info = mqttc.publish(topic, payload, qos=QOS, retain=False)
                         if info.rc != mqtt.MQTT_ERR_SUCCESS:
                             logger.warning(f"Publish rc={info.rc}; enqueue offline")
@@ -785,8 +806,23 @@ def main():
                     if mqtt_enabled:
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
 
-                # Opportunistic flush
-                if (not signalk_direct_enabled) and mqtt_enabled and mqtt_online and offline_queue.size() > 0:
+                if signalk_direct_enabled:
+                    sk_packet = build_signalk_update(
+                        pkt,
+                        cfg["station_uuid"],
+                        cfg["latitude"],
+                        cfg["longitude"],
+                        cfg["signalk_context"],
+                        cfg["signalk_path_map"],
+                    )
+                    sk_payload = json.dumps(sk_packet, separators=(",", ":"), default=datetime_serializer)
+                    try:
+                        signalk_ws.publish(sk_payload)
+                    except Exception as e:
+                        logger.warning(f"Signal K websocket publish failed: {e}")
+
+                # Opportunistic MQTT flush
+                if mqtt_enabled and mqtt_online and offline_queue.size() > 0:
                     flush_offline_queue(mqttc, batch_size=200)
 
                 logger.info(f"Cycle OK: keys={len(pkt)} offline_q={offline_queue.size()}")
