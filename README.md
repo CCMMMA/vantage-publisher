@@ -203,6 +203,14 @@ To publish directly to a Signal K server, set:
 - `signalkToken`: API token (if your Signal K server requires authentication)
 - `signalkContext`: target context (usually `meteo.<uuid>`)
 
+Runtime behavior when Signal K is enabled:
+
+1. The publisher checks whether Signal K security is enabled.
+2. If security is enabled and `signalkToken` is missing or invalid, it automatically submits an access request.
+3. While waiting for token approval, the main loop continues other enabled operations (CSV storage and/or MQTT).
+4. The publisher periodically re-checks access request status and token validity.
+5. As soon as a valid token is available, it is saved into `config.json` (`signalkToken`) and direct websocket publishing starts automatically.
+
 For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websocket stream URL:
 `wss://signalk.meteo.uniparthenope.it/signalk/v1/stream`
 
@@ -262,9 +270,11 @@ For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websoc
 3. Keep `mqtt` as `false` if you only want direct Signal K publishing.
 4. Start the publisher:
    - `python3 vantage-publisher.py --config config.json --signalk true`
-5. Verify updates on Signal K:
+5. If Signal K security is enabled, approve the pending access request on the Signal K server UI/API.
+6. Wait for the periodic token check; the publisher will save the approved token into `config.json` and begin websocket publishing automatically.
+7. Verify updates on Signal K:
    - check that context `meteo.it.uniparthenope.meteo.ws1` receives `navigation.position` and weather paths.
-6. Optional validation mode:
+8. Optional validation mode:
    - run `python3 vantage-publisher.py --dry` to inspect generated `SIGNALK_UPDATE` logs without network publish.
 
 ## Storage layout

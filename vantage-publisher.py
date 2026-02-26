@@ -18,6 +18,7 @@ from contextlib import closing
 from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urlparse, urlunparse
 
 import requests
 import paho.mqtt.client as mqtt
@@ -387,6 +388,260 @@ class SignalKWebsocketPublisher:
             pass
         self._ws = None
 
+
+def signalk_http_base(server_url: str) -> str:
+    parsed = urlparse(str(server_url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    scheme = "https" if parsed.scheme == "wss" else "http" if parsed.scheme == "ws" else parsed.scheme
+    path = parsed.path or ""
+    if "/signalk/v1/stream" in path:
+        prefix = path.split("/signalk/v1/stream", 1)[0]
+        base_path = f"{prefix}/signalk/v1"
+    elif path.endswith("/stream"):
+        base_path = path[: -len("/stream")]
+    else:
+        base_path = path.rstrip("/")
+    if not base_path:
+        base_path = "/signalk/v1"
+    return urlunparse((scheme, parsed.netloc, base_path, "", "", ""))
+
+
+def save_signalk_token_to_config(config_path: Path, token: str):
+    token = str(token or "").strip()
+    if not token:
+        return
+    try:
+        cfg = load_json_file(config_path)
+        if not isinstance(cfg, dict):
+            logger.warning(f"Cannot persist Signal K token: config is not a JSON object ({config_path})")
+            return
+        if str(cfg.get("signalkToken", "") or "").strip() == token:
+            return
+        cfg["signalkToken"] = token
+        with config_path.open("w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        logger.info(f"Signal K token saved to {config_path}")
+    except Exception as e:
+        logger.warning(f"Failed to persist Signal K token to config: {e}")
+
+
+class SignalKAccessManager:
+    """Manage Signal K security checks, token acquisition, and token persistence."""
+
+    def __init__(
+        self,
+        server_url: str,
+        station_uuid: str,
+        config_path: Path,
+        initial_token: str = "",
+        timeout: float = 10.0,
+        check_interval_sec: int = 60,
+        request_retry_sec: int = 300,
+    ):
+        self.server_url = str(server_url or "").strip()
+        self.http_base = signalk_http_base(self.server_url)
+        self.station_uuid = str(station_uuid or "station")
+        self.config_path = Path(config_path)
+        self.timeout = float(timeout)
+        self.check_interval_sec = max(10, int(check_interval_sec))
+        self.request_retry_sec = max(30, int(request_retry_sec))
+        self.token = str(initial_token or "").strip()
+        self.security_enabled = None
+        self.request_href = ""
+        self.next_check_at = 0.0
+        self.next_request_at = 0.0
+        self.request_id = f"vantage-{self.station_uuid}"
+
+    def _url(self, suffix: str) -> str:
+        return f"{self.http_base.rstrip('/')}/{suffix.lstrip('/')}"
+
+    def _token_from_response(self, data) -> str:
+        if not isinstance(data, dict):
+            return ""
+        for key in ("token", "jwt", "accessToken"):
+            val = data.get(key)
+            if val:
+                return str(val).strip()
+        validate_obj = data.get("validate")
+        if isinstance(validate_obj, dict):
+            tok = validate_obj.get("token")
+            if tok:
+                return str(tok).strip()
+        return ""
+
+    def _check_security_enabled(self):
+        if not self.http_base:
+            return None
+        url = self._url("access/requests")
+        try:
+            r = requests.get(url, timeout=self.timeout)
+        except Exception as e:
+            logger.warning(f"Signal K security check failed ({url}): {e}")
+            return None
+        if r.status_code in (200, 202, 401, 403):
+            return True
+        if r.status_code in (404, 405, 501):
+            return False
+        logger.warning(f"Signal K security check unexpected HTTP {r.status_code} ({url})")
+        return None
+
+    def _validate_token(self):
+        if not self.token or not self.http_base:
+            return False
+        url = self._url("auth/validate")
+        try:
+            r = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=self.timeout,
+            )
+        except Exception as e:
+            logger.warning(f"Signal K token validate request failed ({url}): {e}")
+            return None
+        if r.status_code == 200:
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            refreshed = self._token_from_response(data)
+            if refreshed and refreshed != self.token:
+                self.token = refreshed
+                save_signalk_token_to_config(self.config_path, refreshed)
+            return True
+        if r.status_code in (401, 403):
+            return False
+        if r.status_code in (404, 405, 501):
+            return None
+        logger.warning(f"Signal K token validation unexpected HTTP {r.status_code} ({url})")
+        return None
+
+    def _resolve_request_url(self, href: str) -> str:
+        href = str(href or "").strip()
+        if not href:
+            return ""
+        if href.startswith("http://") or href.startswith("https://"):
+            return href
+        parsed = urlparse(self.http_base)
+        return urlunparse((parsed.scheme, parsed.netloc, href, "", "", ""))
+
+    def _submit_access_request(self):
+        if not self.http_base:
+            return False
+        url = self._url("access/requests")
+        payload = {
+            "clientId": self.request_id,
+            "description": f"Vantage Publisher device {self.station_uuid}",
+        }
+        try:
+            r = requests.post(url, json=payload, timeout=self.timeout)
+        except Exception as e:
+            logger.warning(f"Signal K access request submission failed ({url}): {e}")
+            return False
+        if r.status_code in (200, 202):
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            self.request_href = str(data.get("href", "") or "").strip()
+            state = str(data.get("state", "") or "").upper()
+            token = self._token_from_response(data)
+            if token:
+                self.token = token
+                save_signalk_token_to_config(self.config_path, token)
+                logger.info("Signal K token acquired from access request response")
+                return True
+            if self.request_href:
+                logger.info(f"Signal K access request state={state or 'PENDING'} href={self.request_href}")
+                return False
+            logger.warning("Signal K access request accepted without href/token; will retry later")
+            return False
+        if r.status_code in (404, 405, 501):
+            logger.warning("Signal K access requests endpoint unavailable; cannot request token automatically")
+            return False
+        logger.warning(f"Signal K access request rejected HTTP {r.status_code}: {r.text[:200]}")
+        return False
+
+    def _poll_access_request(self):
+        if not self.request_href:
+            return False
+        url = self._resolve_request_url(self.request_href)
+        if not url:
+            return False
+        try:
+            r = requests.get(url, timeout=self.timeout)
+        except Exception as e:
+            logger.warning(f"Signal K access request poll failed ({url}): {e}")
+            return False
+        if r.status_code != 200:
+            logger.warning(f"Signal K access request poll HTTP {r.status_code} ({url})")
+            return False
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        state = str(data.get("state", "") or "").upper()
+        token = self._token_from_response(data)
+        if token:
+            self.token = token
+            save_signalk_token_to_config(self.config_path, token)
+            self.request_href = ""
+            logger.info("Signal K access request approved; token acquired")
+            return True
+        if state in ("DENIED", "REJECTED"):
+            logger.warning(f"Signal K access request {state}; will retry later")
+            self.request_href = ""
+        return False
+
+    def on_ws_error(self, exc: Exception):
+        msg = str(exc).lower()
+        if "401" in msg or "403" in msg or "unauthorized" in msg or "forbidden" in msg:
+            if self.token:
+                logger.warning("Signal K token rejected by websocket; requesting a new token")
+            self.token = ""
+            self.request_href = ""
+            self.next_request_at = 0.0
+
+    def update(self, now_ts: float):
+        if now_ts < self.next_check_at:
+            return
+        self.next_check_at = now_ts + self.check_interval_sec
+
+        sec = self._check_security_enabled()
+        if sec is not None:
+            self.security_enabled = sec
+
+        # If security is disabled/unsupported, publishing can proceed without a token.
+        if self.security_enabled is False:
+            return
+
+        token_state = self._validate_token()
+        if token_state is True:
+            return
+        if token_state is False:
+            if self.token:
+                logger.warning("Signal K token is invalid; requesting a new token")
+            self.token = ""
+
+        if self._poll_access_request():
+            return
+
+        if now_ts >= self.next_request_at:
+            self._submit_access_request()
+            self.next_request_at = now_ts + self.request_retry_sec
+            self._poll_access_request()
+
+    def token_for_ws(self) -> str:
+        # With security disabled/unknown, keep configured token if present.
+        if self.security_enabled is False:
+            return ""
+        return str(self.token or "").strip()
+
+    def can_publish(self) -> bool:
+        if self.security_enabled is False:
+            return True
+        return bool(self.token_for_ws())
 
 class StorageHTTPRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, directory=None, username="", password="", **kwargs):
@@ -826,7 +1081,8 @@ def main():
     logger.info("Starting VantagePro2 publisher")
     args = parse_args()
 
-    config_data = load_json_file(Path(args.config))
+    config_path = Path(args.config)
+    config_data = load_json_file(config_path)
     parameters_data = load_parameters_map(Path(args.parameters))
     cfg = normalize_config(config_data)
     dry_mode = bool(args.dry)
@@ -870,6 +1126,8 @@ def main():
         logger.warning("Signal K enabled but signalkServerUrl is empty; Signal K runtime disabled")
 
     signalk_ws = None
+    signalk_access = None
+    signalk_ws_token = ""
     mqttc = None
 
     if mqtt_runtime_enabled and not dry_mode:
@@ -896,10 +1154,24 @@ def main():
         logger.info("MQTT runtime disabled")
 
     if signalk_runtime_enabled and not dry_mode:
-        signalk_ws = SignalKWebsocketPublisher(
-            cfg["signalk_server_url"], cfg["signalk_token"], timeout=cfg["timeout"]
+        signalk_access = SignalKAccessManager(
+            server_url=cfg["signalk_server_url"],
+            station_uuid=cfg["station_uuid"],
+            config_path=config_path,
+            initial_token=cfg["signalk_token"],
+            timeout=cfg["timeout"],
         )
-        logger.info(f"Signal K direct mode enabled ({cfg['signalk_server_url']})")
+        signalk_access.update(time.time())
+        if signalk_access.can_publish():
+            signalk_ws_token = signalk_access.token_for_ws()
+            signalk_ws = SignalKWebsocketPublisher(
+                cfg["signalk_server_url"],
+                signalk_ws_token,
+                timeout=cfg["timeout"],
+            )
+            logger.info(f"Signal K direct mode enabled ({cfg['signalk_server_url']})")
+        else:
+            logger.info("Signal K waiting for a valid token; publish will start after token approval")
     else:
         logger.info("Signal K runtime disabled")
 
@@ -944,6 +1216,8 @@ def main():
     try:
         while not stop_event.is_set():
             pkt, pkt_ts, pkt_seq = usb_thread.get_latest()
+            if signalk_runtime_enabled and signalk_access is not None:
+                signalk_access.update(time.time())
 
             if pkt and pkt_seq != last_seq:
                 last_seq = pkt_seq
@@ -1010,10 +1284,33 @@ def main():
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
 
                 if signalk_runtime_enabled:
+                    if signalk_access is not None:
+                        if signalk_access.can_publish():
+                            current_token = signalk_access.token_for_ws()
+                            if signalk_ws is None or current_token != signalk_ws_token:
+                                if signalk_ws is not None:
+                                    signalk_ws.close()
+                                signalk_ws_token = current_token
+                                signalk_ws = SignalKWebsocketPublisher(
+                                    cfg["signalk_server_url"],
+                                    signalk_ws_token,
+                                    timeout=cfg["timeout"],
+                                )
+                                logger.info("Signal K websocket publisher is ready")
+                        elif signalk_ws is not None:
+                            signalk_ws.close()
+                            signalk_ws = None
+                            signalk_ws_token = ""
                     try:
-                        signalk_ws.publish(signalk_payload)
+                        if signalk_ws is not None:
+                            signalk_ws.publish(signalk_payload)
                     except Exception as e:
                         logger.warning(f"Signal K websocket publish failed: {e}")
+                        if signalk_access is not None:
+                            signalk_access.on_ws_error(e)
+                        if signalk_ws is not None:
+                            signalk_ws.close()
+                            signalk_ws = None
 
                 # Opportunistic MQTT flush
                 if mqtt_runtime_enabled and mqtt_online and offline_queue.size() > 0:
