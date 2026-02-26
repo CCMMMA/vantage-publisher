@@ -158,6 +158,22 @@ class OfflineQueueSQLite:
             return int(cnt)
 
 
+class NoopOfflineQueue:
+    """In-memory no-op queue used when MQTT persistence is disabled."""
+
+    def enqueue(self, topic: str, payload: str, qos: int = 0, retain: bool = False):
+        return
+
+    def peek_batch(self, limit: int = 200):
+        return []
+
+    def delete_ids(self, ids):
+        return
+
+    def size(self) -> int:
+        return 0
+
+
 # ---------------------------------------------------------------------
 # CSV storage
 # ---------------------------------------------------------------------
@@ -721,7 +737,7 @@ def build_mqtt_client(mqtt_cfg: dict, timeout: float) -> mqtt.Client:
     mqttc.on_publish = on_publish
 
     mqttc.reconnect_delay_set(min_delay=1, max_delay=30)
-    mqttc.connect(mqtt_cfg["host"], int(mqtt_cfg["port"]), int(mqtt_cfg.get("keepalive", timeout)))
+    mqttc.connect_async(mqtt_cfg["host"], int(mqtt_cfg["port"]), int(mqtt_cfg.get("keepalive", timeout)))
     mqttc.loop_start()
     return mqttc
 
@@ -819,15 +835,6 @@ def main():
     elif storage_enabled:
         logger.warning("Storage enabled but pathStorage is empty; CSV storage will be skipped")
 
-    # Offline buffer DB stored alongside CSV root
-    db_path = str(cfg["spool_path"])
-    offline_queue = OfflineQueueSQLite(
-        db_path=db_path,
-        max_messages=cfg["offline_max_messages"],
-        max_age_sec=cfg["offline_max_age_sec"],
-    )
-    logger.info(f"Offline MQTT queue DB: {db_path} (size={offline_queue.size()})")
-
     # AirLink
     if dry_mode:
         airlink_id = ""
@@ -852,8 +859,25 @@ def main():
     mqttc = None
 
     if mqtt_runtime_enabled and not dry_mode:
-        mqttc = build_mqtt_client(mqtt_cfg, cfg["timeout"])
-        logger.info("MQTT client started")
+        # Offline buffer DB stored alongside CSV root.
+        db_path = str(cfg["spool_path"])
+        offline_queue = OfflineQueueSQLite(
+            db_path=db_path,
+            max_messages=cfg["offline_max_messages"],
+            max_age_sec=cfg["offline_max_age_sec"],
+        )
+        logger.info(f"Offline MQTT queue DB: {db_path} (size={offline_queue.size()})")
+    else:
+        offline_queue = NoopOfflineQueue()
+        logger.info("Offline MQTT queue disabled")
+
+    if mqtt_runtime_enabled and not dry_mode:
+        try:
+            mqttc = build_mqtt_client(mqtt_cfg, cfg["timeout"])
+            logger.info("MQTT client started (async connect)")
+        except Exception as e:
+            mqtt_runtime_enabled = False
+            logger.error(f"MQTT client startup failed: {e}; MQTT runtime disabled")
     else:
         logger.info("MQTT runtime disabled")
 
