@@ -1,8 +1,8 @@
 {
-"uuid": "it.uniparthenope.meteo.ws1",
-"name": "Centro Direzionale",
-"lon": 14.2845,
-"lat": 40.8569,
+"uuid": "it.uniparthenope.meteo.wsN",
+"name": "New Weather Station",
+"lon": 0,
+"lat": 0,
 
 "storage": true,
 "mqtt": false,
@@ -24,7 +24,7 @@
 "mqttFormat": "flat",
 "signalkServerUrl": "",
 "signalkToken": "",
-"signalkContext": "meteo.it.uniparthenope.meteo.ws1",
+"signalkContext": "meteo.urn:mrn:signalk:fqdn:wsN_meteo_uniparthenope_it",
 "signalkPathMap": {},
 
 "httpEnabled": false,
