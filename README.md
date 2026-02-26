@@ -194,6 +194,79 @@ When Signal K is enabled (`signalk=true` or `--signalk true`), the publisher sen
   - otherwise standard mappings for common weather keys
   - otherwise fallback to `environment.<field>`
 
+## Direct Signal K configuration
+
+To publish directly to a Signal K server, set:
+
+- `signalk: true`
+- `signalkServerUrl`: websocket stream endpoint (`ws://...` or `wss://...`)
+- `signalkToken`: API token (if your Signal K server requires authentication)
+- `signalkContext`: target context (usually `meteo.<uuid>`)
+
+For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websocket stream URL:
+`wss://signalk.meteo.uniparthenope.it/signalk/v1/stream`
+
+### Example `config.json` (Signal K direct mode)
+
+```json
+{
+  "uuid": "it.uniparthenope.meteo.ws1",
+  "name": "Centro Direzionale",
+  "lon": 14.2845,
+  "lat": 40.8569,
+
+  "storage": true,
+  "mqtt": false,
+  "signalk": true,
+
+  "usbPort": 22222,
+  "usbPollInterval": 1.0,
+  "delay": 10,
+  "timeout": 60,
+
+  "pathStorage": "/storage/vantage-pro/",
+
+  "mqttBroker": "",
+  "mqttPort": 1883,
+  "mqttUser": "",
+  "mqttPass": "",
+  "mqttQos": 1,
+  "mqttFormat": "flat",
+
+  "signalkServerUrl": "wss://signalk.meteo.uniparthenope.it/signalk/v1/stream",
+  "signalkToken": "REPLACE_WITH_SIGNAL_K_TOKEN",
+  "signalkContext": "meteo.it.uniparthenope.meteo.ws1",
+  "signalkPathMap": {},
+
+  "httpEnabled": false,
+  "httpHost": "0.0.0.0",
+  "httpPort": 8080,
+  "httpUser": "",
+  "httpPass": "",
+  "httpRoot": "/storage/vantage-pro/",
+
+  "offlineMaxMessages": 200000,
+  "offlineMaxAgeSec": 604800,
+  "airlinkIntervalSec": 300
+}
+```
+
+### Step-by-step
+
+1. Create a local config from the sample:
+   - `cp config.json.sample config.json`
+2. Edit `config.json` and set:
+   - `signalk` to `true`
+   - `signalkServerUrl` to `wss://signalk.meteo.uniparthenope.it/signalk/v1/stream`
+   - `signalkToken` to a valid token from your Signal K server
+3. Keep `mqtt` as `false` if you only want direct Signal K publishing.
+4. Start the publisher:
+   - `python3 vantage-publisher.py --config config.json --signalk true`
+5. Verify updates on Signal K:
+   - check that context `meteo.it.uniparthenope.meteo.ws1` receives `navigation.position` and weather paths.
+6. Optional validation mode:
+   - run `python3 vantage-publisher.py --dry` to inspect generated `SIGNALK_UPDATE` logs without network publish.
+
 ## Storage layout
 
 - CSV files (hourly rotation): `<pathStorage>/<uuid>/<YYYY>/<MM>/<DD>/<uuid>_<YYYYMMDD>Z<HH>00.csv`
