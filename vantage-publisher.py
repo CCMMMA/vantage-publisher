@@ -212,14 +212,28 @@ def ensure_csv_schema(csv_path: Path, new_fields):
 
 def save_data_to_csv(config_data, packet_data):
     try:
-        ts = packet_data.get("Datetime", utc_now_iso())
-        year, month, day = ts[:4], ts[5:7].zfill(2), ts[8:10].zfill(2)
+        ts = str(packet_data.get("Datetime", "") or "").strip()
+        dt = None
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                dt = None
+        if dt is None:
+            dt = datetime.utcnow()
+
+        station_uuid = str(config_data.get("station_uuid") or config_data.get("uuid") or "station")
+        year = dt.strftime("%Y")
+        month = dt.strftime("%m")
+        day = dt.strftime("%d")
+        hour = dt.strftime("%H")
+        ymd = dt.strftime("%Y%m%d")
 
         root = Path(config_data["pathStorage"])
-        month_dir = root / year / month
-        month_dir.mkdir(parents=True, exist_ok=True)
+        hour_dir = root / station_uuid / year / month / day
+        hour_dir.mkdir(parents=True, exist_ok=True)
 
-        csv_path = month_dir / f"{year}-{month}-{day}.csv"
+        csv_path = hour_dir / f"{station_uuid}_{ymd}Z{hour}00.csv"
 
         fieldnames = ensure_csv_schema(csv_path, packet_data.keys())
         with csv_path.open("a", newline="") as f:

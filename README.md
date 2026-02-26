@@ -196,7 +196,8 @@ When Signal K is enabled (`signalk=true` or `--signalk true`), the publisher sen
 
 ## Storage layout
 
-- CSV files: `<pathStorage>/<YYYY>/<MM>/<YYYY-MM-DD>.csv`
+- CSV files (hourly rotation): `<pathStorage>/<uuid>/<YYYY>/<MM>/<DD>/<uuid>_<YYYYMMDD>Z<HH>00.csv`
+  - example: `/storage/vantage-pro/it.uniparthenope.meteo.ws1/2026/02/26/it.uniparthenope.meteo.ws1_20260226Z1400.csv`
 - MQTT offline queue DB: `<pathStorage>/mqtt_offline_queue.sqlite` (or `mqttSpoolFile`)
 
 ## License
