@@ -2,6 +2,7 @@ version: '3'
 services:
   vantage-publisher:
     image: vantage-publisher
+    command: ["python", "-u", "vantage-publisher.py"]
     volumes:
       - ./config.json:/vantage-publisher/config.json
       - ./parameters.json:/vantage-publisher/parameters.json

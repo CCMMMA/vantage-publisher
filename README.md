@@ -1,6 +1,6 @@
 # Vantage Publisher
 
-`vantage-publisher-threading.py` reads live data from a Davis Vantage Pro2 console, optionally stores CSV rows locally, optionally publishes MQTT packets, and optionally sends Signal K deltas via websocket.
+`vantage-publisher.py` reads live data from a Davis Vantage Pro2 console, optionally stores CSV rows locally, optionally publishes MQTT packets, and optionally sends Signal K deltas via websocket.
 
 ## Features
 
@@ -101,19 +101,19 @@ If file is missing, all fields are included.
 
 ```bash
 # Use config defaults
-python3 vantage-publisher-threading.py
+python3 vantage-publisher.py
 
 # Enable MQTT and storage explicitly
-python3 vantage-publisher-threading.py --mqtt true --storage true
+python3 vantage-publisher.py --mqtt true --storage true
 
 # Enable Signal K direct websocket together with MQTT and storage
-python3 vantage-publisher-threading.py --signalk true --mqtt true --storage true
+python3 vantage-publisher.py --signalk true --mqtt true --storage true
 
 # Dry mode validation (no publish/store/connect)
-python3 vantage-publisher-threading.py --dry
+python3 vantage-publisher.py --dry
 
 # Custom config + parameters
-python3 vantage-publisher-threading.py \
+python3 vantage-publisher.py \
   --config /etc/vantage/config.json \
   --parameters /etc/vantage/parameters.json
 ```
