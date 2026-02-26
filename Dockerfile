@@ -17,7 +17,7 @@ RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
 COPY airlink.py airlink.py
-COPY vantage.log /var/log/vantage.log
+#COPY vantage.log /var/log/vantage.log
 COPY vantage-publisher-threading.py vantage-publisher-threading.py
 
 CMD ["python", "-u", "vantage-publisher-threading.py"]
