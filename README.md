@@ -53,7 +53,33 @@ python3 -m pip install -r requirements.txt
   "signalkServerUrl": "ws://signalk.local:3000/signalk/v1/stream",
   "signalkToken": "",
   "signalkContext": "meteo.it.uniparthenope.meteo.ws1",
-  "signalkPathMap": {},
+  "signalkPathMap": {
+    "BarTrend": "environment.outside.pressureTrend",
+    "Barometer": "environment.outside.pressure",
+    "TempIn": "environment.inside.temperature",
+    "HumIn": "environment.inside.humidity",
+    "TempOut": "environment.outside.temperature",
+    "WindSpeed": "environment.wind.speedApparent",
+    "WindSpeed10Min": "environment.wind.speedAverage",
+    "WindDir": "environment.wind.angleApparent",
+    "HumOut": "environment.outside.humidity",
+    "RainRate": "environment.rain.rate",
+    "SolarRad": "environment.solar.radiation",
+    "RainStorm": "environment.rain.storm.total",
+    "StormStartDate": "environment.rain.storm.startDate",
+    "RainDay": "environment.rain.day",
+    "RainMonth": "environment.rain.month",
+    "RainYear": "environment.rain.year",
+    "ETDay": "environment.outside.evapoTranspiration.day",
+    "ETMonth": "environment.outside.evapoTranspiration.month",
+    "ETYear": "environment.outside.evapoTranspiration.year",
+    "BatteryStatus": "electrical.batteries.sensor.status",
+    "BatteryVolts": "electrical.batteries.sensor.voltage",
+    "ForecastIcon": "environment.weather.forecast.icon",
+    "ForecastRuleNo": "environment.weather.forecast.ruleNumber",
+    "SunRise": "environment.sun.rise",
+    "SunSet": "environment.sun.set"
+  },
 
   "httpEnabled": false,
   "httpHost": "0.0.0.0",
@@ -211,6 +237,9 @@ Runtime behavior when Signal K is enabled:
 4. The publisher periodically re-checks access request status and token validity.
 5. As soon as a valid token is available, it is saved into `config.json` (`signalkToken`) and direct websocket publishing starts automatically.
 
+Note:
+- `Datetime`, `DatetimeWS`, `position`, and `name` are handled internally by the publisher and are not required in `signalkPathMap`.
+
 For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websocket stream URL:
 `wss://signalk.meteo.uniparthenope.it/signalk/v1/stream`
 
@@ -244,7 +273,33 @@ For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websoc
   "signalkServerUrl": "wss://signalk.meteo.uniparthenope.it/signalk/v1/stream",
   "signalkToken": "REPLACE_WITH_SIGNAL_K_TOKEN",
   "signalkContext": "meteo.it.uniparthenope.meteo.ws1",
-  "signalkPathMap": {},
+  "signalkPathMap": {
+    "BarTrend": "environment.outside.pressureTrend",
+    "Barometer": "environment.outside.pressure",
+    "TempIn": "environment.inside.temperature",
+    "HumIn": "environment.inside.humidity",
+    "TempOut": "environment.outside.temperature",
+    "WindSpeed": "environment.wind.speedApparent",
+    "WindSpeed10Min": "environment.wind.speedAverage",
+    "WindDir": "environment.wind.angleApparent",
+    "HumOut": "environment.outside.humidity",
+    "RainRate": "environment.rain.rate",
+    "SolarRad": "environment.solar.radiation",
+    "RainStorm": "environment.rain.storm.total",
+    "StormStartDate": "environment.rain.storm.startDate",
+    "RainDay": "environment.rain.day",
+    "RainMonth": "environment.rain.month",
+    "RainYear": "environment.rain.year",
+    "ETDay": "environment.outside.evapoTranspiration.day",
+    "ETMonth": "environment.outside.evapoTranspiration.month",
+    "ETYear": "environment.outside.evapoTranspiration.year",
+    "BatteryStatus": "electrical.batteries.sensor.status",
+    "BatteryVolts": "electrical.batteries.sensor.voltage",
+    "ForecastIcon": "environment.weather.forecast.icon",
+    "ForecastRuleNo": "environment.weather.forecast.ruleNumber",
+    "SunRise": "environment.sun.rise",
+    "SunSet": "environment.sun.set"
+  },
 
   "httpEnabled": false,
   "httpHost": "0.0.0.0",
