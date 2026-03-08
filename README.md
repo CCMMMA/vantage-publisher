@@ -29,6 +29,7 @@ python3 -m pip install -r requirements.txt
 {
   "uuid": "it.uniparthenope.meteo.ws1",
   "name": "Centro Direzionale",
+  "airlinkId:"",
   "lon": 14.2845,
   "lat": 40.8569,
 
@@ -112,7 +113,7 @@ Boolean map of station fields:
 - `true`: include field
 - `false`: exclude field
 
-If file is missing, all fields are included.
+If the file is missing, all fields are included.
 
 ## Command line options
 
@@ -218,7 +219,7 @@ When Signal K is enabled (`signalk=true` or `--signalk true`), the publisher sen
 - remaining fields:
   - from `signalkPathMap` if present
   - otherwise standard mappings for common weather keys
-  - otherwise fallback to `environment.<field>`
+  - otherwise, fallback to `environment.<field>`.
 
 ## Direct Signal K configuration
 
@@ -249,6 +250,7 @@ For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websoc
 {
   "uuid": "it.uniparthenope.meteo.ws1",
   "name": "Centro Direzionale",
+  "airlinkId:"",
   "lon": 14.2845,
   "lat": 40.8569,
 
