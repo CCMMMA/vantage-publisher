@@ -35,8 +35,8 @@ def airlinkData(uuid, api_key="", api_secret=""):
             raw_data = sensor["data"][0]
 
             # WeatherLink temperatures are reported in Fahrenheit.
-            # Convert to SI base unit Kelvin.
-            F_to_K = ['temp', 'heat_index', 'dew_point', 'wet_bulb']
+            # Convert to SI base unit Celsius.
+            F_to_C = ['temp', 'heat_index', 'dew_point', 'wet_bulb']
             # WeatherLink pressure is reported in inHg.
             # Convert to SI base unit Pascal.
             inHg_to_Pa = ['bar']
@@ -50,9 +50,9 @@ def airlinkData(uuid, api_key="", api_secret=""):
 
             for field in fields:
                 if field in raw_data:
-                    if field in F_to_K:
+                    if field in F_to_C:
                         try:
-                            data[field] = (float(raw_data[field]) - 32.0) * 5.0 / 9.0 + 273.15
+                            data[field] = (float(raw_data[field]) - 32.0) * 5.0 / 9.0
                         except(ValueError, TypeError) as e:
                             logger.warning("Unable to convert field %s: %s", field, e)
                     elif field in inHg_to_Pa:
