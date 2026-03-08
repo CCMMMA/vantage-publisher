@@ -30,6 +30,8 @@ python3 -m pip install -r requirements.txt
   "uuid": "it.uniparthenope.meteo.ws1",
   "name": "Centro Direzionale",
   "airlinkId": "",
+  "airlinkApiKey": "",
+  "airlinkApiSecret": "",
   "lon": 14.2845,
   "lat": 40.8569,
 
@@ -105,6 +107,11 @@ python3 -m pip install -r requirements.txt
 
 - `flat` (default/fallback)
 - `geojson`
+
+AirLink credentials:
+
+- `airlinkApiKey`: WeatherLink API key for current conditions API
+- `airlinkApiSecret`: WeatherLink secret used in `X-Api-Secret`
 
 ## Parameters file (`parameters.json`)
 
@@ -251,6 +258,8 @@ For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websoc
   "uuid": "it.uniparthenope.meteo.ws1",
   "name": "Centro Direzionale",
   "airlinkId": "",
+  "airlinkApiKey": "",
+  "airlinkApiSecret": "",
   "lon": 14.2845,
   "lat": 40.8569,
 

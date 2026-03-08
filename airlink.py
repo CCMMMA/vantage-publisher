@@ -1,9 +1,19 @@
 import requests
+import logging
 
-def airlinkData(uuid):
-    url = f"https://api.weatherlink.com/v2/current/{uuid}?api-key=b3xchodamrmfri3qd2zguel7nifkndh9"
+
+logger = logging.getLogger(__name__)
+
+def airlinkData(uuid, api_key="", api_secret=""):
+    api_key = str(api_key or "").strip()
+    api_secret = str(api_secret or "").strip()
+    if not api_key or not api_secret:
+        logger.warning("AirLink credentials missing: set airlinkApiKey and airlinkApiSecret in config")
+        return {}
+
+    url = f"https://api.weatherlink.com/v2/current/{uuid}?api-key={api_key}"
     headers = {
-        'X-Api-Secret': 'zl4kshrwl7t0xl8z2u07ewptbmjfcdg9'
+        'X-Api-Secret': api_secret
     }
 
     data = {}
@@ -12,10 +22,10 @@ def airlinkData(uuid):
         response.raise_for_status()
         res = response.json()
     except requests.RequestException as e:
-        print(f"Errore sulla richiesta dati Airlink: {e}")
+        logger.error("AirLink data request failed: %s", e)
         return data
     except ValueError as e:
-        print(f"Errore nel parsing JSON: {e}")
+        logger.error("JSON parsing failed: %s", e)
         return data
 
     sensors = res.get("sensors", [])
@@ -24,33 +34,37 @@ def airlinkData(uuid):
         if sensor.get("data") and "hum" in sensor["data"][0]:
             raw_data = sensor["data"][0]
 
-            F_to_C = ['temp', 'heat_index', 'dew_point', 'wet_bulb']
-            inHg_to_hPa = ['bar']
+            # WeatherLink temperatures are reported in Fahrenheit.
+            # Convert to SI base unit Kelvin.
+            F_to_K = ['temp', 'heat_index', 'dew_point', 'wet_bulb']
+            # WeatherLink pressure is reported in inHg.
+            # Convert to SI base unit Pascal.
+            inHg_to_Pa = ['bar']
             fields = [
                 'hum', 'pm_10_3_hour', 'pm_10_24_hour', 'pm_2p5_1_hour',
                 'aqi_nowcast_val', 'heat_index', 'pm_2p5_nowcast',
                 'pm_2p5_24_hour', 'pm_1', 'aqi_val', 'temp',
                 'pm_2p5_3_hour', 'aqi_1_hour_val', 'pm_10_nowcast',
-                'pm_10_1_hour', 'dew_point', 'pm_10', 'pm_2p5', 'wet_bulb'
+                'pm_10_1_hour', 'dew_point', 'pm_10', 'pm_2p5', 'wet_bulb', 'bar'
             ]
 
             for field in fields:
                 if field in raw_data:
-                    if field in F_to_C:
+                    if field in F_to_K:
                         try:
-                            data[field] = (float(raw_data[field]) - 32.0) * 5.0 / 9.0
+                            data[field] = (float(raw_data[field]) - 32.0) * 5.0 / 9.0 + 273.15
                         except(ValueError, TypeError) as e:
-                            print(f"Impossibile convertire il campo {field}: {e}")
-                    elif field in inHg_to_hPa:
+                            logger.warning("Unable to convert field %s: %s", field, e)
+                    elif field in inHg_to_Pa:
                         try:
-                            data[field] = (float(raw_data[field]) *  33.86389)
+                            data[field] = float(raw_data[field]) * 3386.389
                         except(ValueError, TypeError) as e:
-                            print(f"Impossibile convertire il campo {field}: {e}")
+                            logger.warning("Unable to convert field %s: %s", field, e)
                     else:
                         try:
                             data[field] = float(raw_data[field])
                         except (ValueError, TypeError) as e:
-                            print(f"Impossibile convertire il campo {field}: {e}")
+                            logger.warning("Unable to convert field %s: %s", field, e)
 
             break
 

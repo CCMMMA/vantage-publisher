@@ -2,6 +2,8 @@
 "uuid": "it.uniparthenope.meteo.wsN",
 "name": "New Weather Station",
 "airlinkId": "",
+"airlinkApiKey": "",
+"airlinkApiSecret": "",
 "lon": 0,
 "lat": 0,
 

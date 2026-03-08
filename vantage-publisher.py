@@ -805,6 +805,8 @@ def normalize_config(cfg: dict) -> dict:
         "offline_max_messages": int(cfg.get("offlineMaxMessages", 200000)),
         "offline_max_age_sec": int(cfg.get("offlineMaxAgeSec", 7 * 86400)),
         "airlink_id": str(cfg.get("airlinkId","") or "").strip(),
+        "airlink_api_key": str(cfg.get("airlinkApiKey","") or "").strip(),
+        "airlink_api_secret": str(cfg.get("airlinkApiSecret","") or "").strip(),
         "airlink_interval_sec": int(cfg.get("airlinkIntervalSec", 300)),
         "mqtt_format": normalize_mqtt_format(cfg.get("mqttFormat")),
         "signalk_server_url": str(cfg.get("signalkServerUrl", "") or "").strip(),
@@ -1240,7 +1242,11 @@ def main():
                 now = time.time()
                 if airlink_id and (last_airlink_data is None or (now - last_airlink_time) > AIRLINK_INTERVAL):
                     try:
-                        last_airlink_data = airlinkData(airlink_id)
+                        last_airlink_data = airlinkData(
+                            airlink_id,
+                            cfg["airlink_api_key"],
+                            cfg["airlink_api_secret"],
+                        )
                         last_airlink_time = now
                     except Exception as e:
                         logger.error(f"AirLink update error: {e}")
