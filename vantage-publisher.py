@@ -804,6 +804,7 @@ def normalize_config(cfg: dict) -> dict:
         },
         "offline_max_messages": int(cfg.get("offlineMaxMessages", 200000)),
         "offline_max_age_sec": int(cfg.get("offlineMaxAgeSec", 7 * 86400)),
+        "airlink_id": str(cfg.get("airlinkId","") or "").strip(),
         "airlink_interval_sec": int(cfg.get("airlinkIntervalSec", 300)),
         "mqtt_format": normalize_mqtt_format(cfg.get("mqttFormat")),
         "signalk_server_url": str(cfg.get("signalkServerUrl", "") or "").strip(),
@@ -915,25 +916,25 @@ class USBReaderThread(threading.Thread):
 # ---------------------------------------------------------------------
 # AirLink
 # ---------------------------------------------------------------------
-def get_airlink_id(config_data) -> str:
-    broker = config_data.get("mqttBroker")
-    if not broker:
-        return ""
-    device_name = config_data["uuid"]
-    url = f"http://{broker}:8088/get_airlink/{device_name}"
-    try:
-        r = requests.get(url, timeout=3)
-        if r.status_code == 200:
-            j = r.json()
-            return j.get("airlinkID", "") or ""
-        if r.status_code == 404:
-            logger.info("AirLink: instrument not found (404)")
-            return ""
-        logger.warning(f"AirLink: HTTP {r.status_code} for {url}")
-        return ""
-    except Exception as e:
-        logger.error(f"AirLink request failed: {e}")
-        return ""
+#def get_airlink_id(config_data) -> str:
+#    broker = config_data.get("mqttBroker")
+#    if not broker:
+#        return ""
+#    device_name = config_data["uuid"]
+#    url = f"http://{broker}:8088/get_airlink/{device_name}"
+#    try:
+#        r = requests.get(url, timeout=3)
+#        if r.status_code == 200:
+#            j = r.json()
+#            return j.get("airlinkID", "") or ""
+#        if r.status_code == 404:
+#            logger.info("AirLink: instrument not found (404)")
+#            return ""
+#        logger.warning(f"AirLink: HTTP {r.status_code} for {url}")
+#        return ""
+#    except Exception as e:
+#        logger.error(f"AirLink request failed: {e}")
+#        return ""
 
 
 # ---------------------------------------------------------------------
@@ -1110,7 +1111,8 @@ def main():
         airlink_id = ""
         logger.info("AirLink disabled in dry mode")
     else:
-        airlink_id = get_airlink_id(config_data)
+        # airlink_id = get_airlink_id(config_data)
+        airlink_id = cfg["airlink_id"]
         if airlink_id:
             logger.info(f"AirLink enabled: {airlink_id}")
         else:

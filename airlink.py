@@ -24,6 +24,8 @@ def airlinkData(uuid):
         if sensor.get("data") and "hum" in sensor["data"][0]:
             raw_data = sensor["data"][0]
 
+            F_to_C = ['temp', 'heat_index', 'dew_point', 'wet_bulb']
+            inHg_to_hPa = ['bar']
             fields = [
                 'hum', 'pm_10_3_hour', 'pm_10_24_hour', 'pm_2p5_1_hour',
                 'aqi_nowcast_val', 'heat_index', 'pm_2p5_nowcast',
@@ -34,10 +36,21 @@ def airlinkData(uuid):
 
             for field in fields:
                 if field in raw_data:
-                    try:
-                        data[field] = float(raw_data[field])
-                    except (ValueError, TypeError) as e:
-                        print(f"Impossibile convertire il campo {field}: {e}")
+                    if field in F_to_C:
+                        try:
+                            data[field] = (float(raw_data[field]) - 32.0) * 5.0 / 9.0
+                        except(ValueError, TypeError) as e:
+                            print(f"Impossibile convertire il campo {field}: {e}")
+                    elif field in inHg_to_hPa:
+                        try:
+                            data[field] = (float(raw_data[field]) *  33.86389)
+                        except(ValueError, TypeError) as e:
+                            print(f"Impossibile convertire il campo {field}: {e}")
+                    else:
+                        try:
+                            data[field] = float(raw_data[field])
+                        except (ValueError, TypeError) as e:
+                            print(f"Impossibile convertire il campo {field}: {e}")
 
             break
 
