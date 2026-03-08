@@ -343,6 +343,41 @@ For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websoc
 8. Optional validation mode:
    - run `python3 vantage-publisher.py --dry` to inspect generated `SIGNALK_UPDATE` logs without network publish.
 
+## Archive collection (`collect-history.py`)
+
+`collect-history.py` downloads archive records from the station using PyVantagePro normalized JSON rows (`get_archives_as_json`), so values are exported in SI-oriented units already provided by the library.
+
+Behavior:
+
+- Uses logging (no `print`)
+- Supports start/stop date range from command line
+- Applies `parameters.json` filtering (if provided)
+- Writes CSV only when `--output` is provided
+- If `--output` is omitted, rows are logged to console
+
+### Options
+
+- `--url <station-url>` station connection URL (default: `tcp:127.0.0.1:22222`)
+- `--timeout <seconds>` read timeout (default: `10`)
+- `--start <ISO-datetime>` archive start datetime
+- `--stop <ISO-datetime>` archive stop datetime (optional)
+- `--parameters <file>` parameters map file (default: `parameters.json`)
+- `--output <file.csv>` output file path (optional)
+- `--log-level <LEVEL>` logger level (default: `INFO`)
+
+### Examples
+
+```bash
+# Collect from 2026-03-01 to 2026-03-08 and write CSV
+python3 collect-history.py \
+  --start 2026-03-01T00:00:00 \
+  --stop 2026-03-08T00:00:00 \
+  --output /tmp/history.csv
+
+# Collect from a date and log rows to console only
+python3 collect-history.py --start 2026-03-07T00:00:00
+```
+
 ## Storage layout
 
 - CSV files (hourly rotation): `<pathStorage>/<uuid>/<YYYY>/<MM>/<DD>/<uuid>_<YYYYMMDD>Z<HH>00.csv`
