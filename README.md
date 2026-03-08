@@ -29,7 +29,7 @@ python3 -m pip install -r requirements.txt
 {
   "uuid": "it.uniparthenope.meteo.ws1",
   "name": "Centro Direzionale",
-  "airlinkId:"",
+  "airlinkId: "",
   "lon": 14.2845,
   "lat": 40.8569,
 
@@ -250,7 +250,7 @@ For the Signal K server `https://signalk.meteo.uniparthenope.it`, use the websoc
 {
   "uuid": "it.uniparthenope.meteo.ws1",
   "name": "Centro Direzionale",
-  "airlinkId:"",
+  "airlinkId: "",
   "lon": 14.2845,
   "lat": 40.8569,
 
