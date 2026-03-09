@@ -39,7 +39,7 @@ def airlinkData(uuid, api_key="", api_secret=""):
             F_to_C = ['temp', 'heat_index', 'dew_point', 'wet_bulb']
             # WeatherLink pressure is reported in inHg.
             # Convert to SI base unit Pascal.
-            inHg_to_Pa = ['bar']
+            inHg_to_HPa = ['bar']
             fields = [
                 'hum', 'pm_10_3_hour', 'pm_10_24_hour', 'pm_2p5_1_hour',
                 'aqi_nowcast_val', 'heat_index', 'pm_2p5_nowcast',
@@ -55,9 +55,9 @@ def airlinkData(uuid, api_key="", api_secret=""):
                             data[field] = (float(raw_data[field]) - 32.0) * 5.0 / 9.0
                         except(ValueError, TypeError) as e:
                             logger.warning("Unable to convert field %s: %s", field, e)
-                    elif field in inHg_to_Pa:
+                    elif field in inHg_to_HPa:
                         try:
-                            data[field] = float(raw_data[field]) * 3386.389
+                            data[field] = float(raw_data[field]) * 33.8639
                         except(ValueError, TypeError) as e:
                             logger.warning("Unable to convert field %s: %s", field, e)
                     else:
