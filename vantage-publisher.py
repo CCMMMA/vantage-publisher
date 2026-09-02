@@ -12,6 +12,7 @@ import signal
 import math
 import argparse
 import base64
+import tempfile
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import closing
@@ -134,6 +135,7 @@ class OfflineQueueSQLite:
             con.commit()
 
     def peek_batch(self, limit: int = 200):
+        self._prune()
         with closing(self._connect()) as con:
             cur = con.execute(
                 """
@@ -199,19 +201,33 @@ def ensure_csv_schema(csv_path: Path, new_fields):
 
             rows = list(reader)
 
-        with csv_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=merged)
-            writer.writeheader()
-            writer.writerows(rows)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", newline="", dir=csv_path.parent, delete=False
+            ) as f:
+                temporary_path = Path(f.name)
+                writer = csv.DictWriter(f, fieldnames=merged)
+                writer.writeheader()
+                writer.writerows(rows)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(temporary_path, csv_path.stat().st_mode)
+            os.replace(temporary_path, csv_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
         logger.info(f"CSV schema updated: {csv_path}")
         return merged
     except Exception as e:
         logger.error(f"CSV schema update error for {csv_path}: {e}")
-        return new_fields
+        raise
 
 
 def save_data_to_csv(config_data, packet_data):
+    if not config_data.get("pathStorage"):
+        return
     try:
         ts = str(packet_data.get("Datetime", "") or "").strip()
         dt = None
@@ -946,47 +962,47 @@ mqtt_online = False
 offline_queue = None  # set in main()
 
 
+# Only the main thread owns this map; callbacks only update connectivity.
+mqtt_pending = {}
+
+
 def flush_offline_queue(mqttc: mqtt.Client, batch_size: int = 200):
-    global mqtt_online, offline_queue
-    if not mqtt_online or offline_queue is None:
+    """Advance one batch without blocking the MQTT network loop or station loop."""
+    if offline_queue is None:
         return
 
-    sent = 0
-    while mqtt_online:
-        rows = offline_queue.peek_batch(limit=batch_size)
-        if not rows:
+    acknowledged = [row_id for row_id, info in mqtt_pending.items() if info.is_published()]
+    offline_queue.delete_ids(acknowledged)
+    for row_id in acknowledged:
+        del mqtt_pending[row_id]
+    if acknowledged:
+        logger.info("MQTT delivery confirmed: sent=%d", len(acknowledged))
+
+    if not mqtt_online:
+        return
+    for row_id, topic, payload, qos, retain in offline_queue.peek_batch(limit=batch_size):
+        if row_id in mqtt_pending:
+            continue
+        if len(mqtt_pending) >= batch_size:
             break
-
-        ids_to_delete = []
-        for (row_id, topic, payload, qos, retain) in rows:
-            try:
-                info = mqttc.publish(topic, payload, qos=int(qos), retain=bool(retain))
-                if info.rc == mqtt.MQTT_ERR_SUCCESS:
-                    ids_to_delete.append(row_id)
-                    sent += 1
-                else:
-                    logger.warning(f"Offline flush publish rc={info.rc}; stopping flush")
-                    mqtt_online = False
-                    break
-            except Exception as e:
-                logger.warning(f"Offline flush publish failed: {e}")
-                mqtt_online = False
+        try:
+            info = mqttc.publish(topic, payload, qos=int(qos), retain=bool(retain))
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                logger.warning("Offline flush publish rc=%s; will retry", info.rc)
                 break
-
-        offline_queue.delete_ids(ids_to_delete)
-
-    if sent:
-        logger.info(f"Offline queue flushed: sent={sent}, remaining={offline_queue.size()}")
+            mqtt_pending[row_id] = info
+        except Exception as e:
+            logger.warning("Offline flush publish failed: %s", e)
+            break
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     global mqtt_online
-    mqtt_online = True
-    logger.info(f"MQTT connected (reason={reason_code}).")
-    try:
-        flush_offline_queue(client, batch_size=300)
-    except Exception as e:
-        logger.error(f"Flush on connect failed: {e}")
+    mqtt_online = reason_code == 0
+    if mqtt_online:
+        logger.info("MQTT connected (reason=%s).", reason_code)
+    else:
+        logger.warning("MQTT connection rejected (reason=%s).", reason_code)
 
 
 def on_disconnect(client, userdata, *args):
@@ -1270,26 +1286,21 @@ def main():
                 signalk_payload = json.dumps(signalk_packet, separators=(",", ":"), default=datetime_serializer)
 
                 if dry_mode:
-                    logger.info(f"CSV_ROW;{json.dumps(pkt, separators=(',', ':'))}")
+                    logger.info(f"CSV_ROW;{json.dumps(pkt, separators=(',', ':'), default=datetime_serializer)}")
                     logger.info(f"MQTT_PACKET;{payload}")
                     logger.info(f"SIGNALK_UPDATE;{signalk_payload}")
+                    stop_event.wait(cfg["delay"])
                     continue
 
                 if storage_enabled:
                     save_data_to_csv(cfg, pkt)
                 
-                try:
-                    if mqtt_runtime_enabled and mqtt_online:
-                        info = mqttc.publish(topic, payload, qos=QOS, retain=False)
-                        if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                            logger.warning(f"Publish rc={info.rc}; enqueue offline")
-                            offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
-                    elif mqtt_runtime_enabled:
+                if mqtt_runtime_enabled:
+                    try:
+                        # Persist before handing the packet to the asynchronous client.
                         offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
-                except Exception as e:
-                    logger.warning(f"Publish exception: {e}; enqueue offline")
-                    if mqtt_runtime_enabled:
-                        offline_queue.enqueue(topic, payload, qos=QOS, retain=False)
+                    except Exception as e:
+                        logger.error("MQTT queue write failed; packet was not queued: %s", e)
 
                 if signalk_runtime_enabled:
                     if signalk_access is not None:
@@ -1320,10 +1331,6 @@ def main():
                             signalk_ws.close()
                             signalk_ws = None
 
-                # Opportunistic MQTT flush
-                if mqtt_runtime_enabled and mqtt_online and offline_queue.size() > 0:
-                    flush_offline_queue(mqttc, batch_size=200)
-
                 logger.info(f"Cycle OK: keys={len(pkt)} offline_q={offline_queue.size()}")
 
             else:
@@ -1332,6 +1339,11 @@ def main():
                 if age is None or age > max(5.0, cfg["delay"] * 2):
                     logger.warning("No USB data available (station read pending or failing)")
 
+            if mqtt_runtime_enabled:
+                try:
+                    flush_offline_queue(mqttc, batch_size=200)
+                except Exception as e:
+                    logger.error("MQTT queue flush failed; will retry: %s", e)
             stop_event.wait(cfg["delay"])
 
     except KeyboardInterrupt:

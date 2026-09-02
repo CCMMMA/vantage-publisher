@@ -2,6 +2,21 @@
 
 `vantage-publisher.py` reads live data from a Davis Vantage Pro2 console, optionally stores CSV rows locally, optionally publishes MQTT packets, and optionally sends Signal K deltas via websocket.
 
+## Documentation
+
+The [technical and operational manual](docs/README.md) provides a detailed account
+of the implementation, its data semantics, and its operational limits:
+
+- [Architecture and timing](docs/architecture.md)
+- [Complete configuration reference](docs/configuration.md)
+- [Observation model, timestamps, units, and payloads](docs/data-model.md)
+- [MQTT, Signal K, AirLink, and HTTP integrations](docs/integrations.md)
+- [Installation and deployment](docs/deployment.md)
+- [Reliability, troubleshooting, backup, and recovery](docs/operations.md)
+- [Historical archive collection](docs/archive-collection.md)
+- [Development and validation](docs/development.md)
+- [Sources and terminology](docs/references.md)
+
 ## Features
 
 - Continuous station stream with reconnect
@@ -143,7 +158,7 @@ python3 vantage-publisher.py --mqtt true --storage true
 # Enable Signal K direct websocket together with MQTT and storage
 python3 vantage-publisher.py --signalk true --mqtt true --storage true
 
-# Dry mode validation (no publish/store/connect)
+# Dry mode validation (live console reads; no output publishing or CSV storage)
 python3 vantage-publisher.py --dry
 
 # Custom config + parameters
@@ -160,7 +175,9 @@ When `--dry` is active:
 - Signal K websocket connection/publish is disabled
 - local CSV writes are disabled
 - HTTP storage server is disabled
-- generated outputs are logged:
+- station reads still connect to ser2net; `--dry` is not an offline configuration validator
+- the configured `delay` applies between output cycles
+- generated outputs are logged (including datetime-valued station fields):
   - `CSV_ROW;...`
   - `MQTT_PACKET;...`
   - `SIGNALK_UPDATE;...`
@@ -216,6 +233,14 @@ Authentication behavior:
 ```
 
 MQTT topic is always `uuid`.
+
+All MQTT packets are written to the SQLite queue before publishing. A bounded batch
+is advanced each main-loop cycle, even when the station has no new readings.
+Records are removed only after Paho reports publish completion (broker acknowledgment
+for QoS 1/2; transmission for QoS 0). Queue age and size limits still apply, including
+before replay after a restart. A crash between delivery and queue deletion can cause
+duplicate delivery; consumers should tolerate duplicates. QoS 0 does not provide a
+broker acknowledgment. See [Paho publish completion documentation](https://eclipse.dev/paho/files/paho.mqtt.python/html/client.html#paho.mqtt.client.Client.publish).
 
 ## Signal K deltas
 
@@ -383,6 +408,24 @@ python3 collect-history.py --start 2026-03-07T00:00:00
 - CSV files (hourly rotation): `<pathStorage>/<uuid>/<YYYY>/<MM>/<DD>/<uuid>_<YYYYMMDD>Z<HH>00.csv`
   - example: `/storage/vantage-pro/it.uniparthenope.meteo.ws1/2026/02/26/it.uniparthenope.meteo.ws1_20260226Z1400.csv`
 - MQTT offline queue DB: `<pathStorage>/mqtt_offline_queue.sqlite` (or `mqttSpoolFile`)
+
+CSV schema expansion uses an atomic file replacement so a failed rewrite preserves
+the existing CSV. If expansion fails, the new row is skipped and the error is logged.
+An empty `pathStorage` skips CSV storage, as reported at startup.
+
+## Development validation
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m py_compile vantage-publisher.py airlink.py collect-history.py tests/test_publisher.py
+```
+
+Regression tests use temporary storage and mocked station/network clients; they do
+not require a live station or installed network dependencies. Live station, MQTT,
+and Signal K integration should be checked in the deployment environment.
+
+`make run` mounts configuration at the runtime's default paths under
+`/vantage-publisher`. Use Docker Compose for the supplied persistent storage mount.
 
 ## License
 
