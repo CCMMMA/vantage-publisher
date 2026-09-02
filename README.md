@@ -15,6 +15,7 @@ of the implementation, its data semantics, and its operational limits:
 - [Reliability, troubleshooting, backup, and recovery](docs/operations.md)
 - [Historical archive collection](docs/archive-collection.md)
 - [Development and validation](docs/development.md)
+- [CI/CD and container releases](docs/ci-cd.md)
 - [Sources and terminology](docs/references.md)
 
 ## Features
@@ -412,6 +413,17 @@ python3 collect-history.py --start 2026-03-07T00:00:00
 CSV schema expansion uses an atomic file replacement so a failed rewrite preserves
 the existing CSV. If expansion fails, the new row is skipped and the error is logged.
 An empty `pathStorage` skips CSV storage, as reported at startup.
+
+## CI/CD
+
+[GitHub Actions](.github/workflows/ci-cd.yml) checks Python 3.8, 3.12, and 3.13,
+builds the runtime image, and smoke-tests its real dependencies. Successful pushes
+to `main` and `v*` tags publish the tested `linux/amd64` image to
+`ghcr.io/ccmmma/vantage-publisher`. Pull requests and manual runs validate without
+publishing. Station rollout remains operator-controlled.
+
+See [CI/CD documentation](docs/ci-cd.md) for permissions, image tags, installation,
+and validation limits.
 
 ## Development validation
 

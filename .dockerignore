@@ -1,0 +1,6 @@
+# Send only the runtime build inputs; station settings and local data stay local.
+*
+!Dockerfile
+!requirements.txt
+!vantage-publisher.py
+!airlink.py

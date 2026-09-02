@@ -71,6 +71,10 @@ The Dockerfile creates a `weather` account but does not select it with `USER`; t
 
 `make run` provides a smaller launch command with configuration mounts and host networking, but no persistent storage mount or restart policy. It is not equivalent to the Compose service for long-term storage. The Docker image copies only the live publisher and AirLink module; `collect-history.py` is not available in that image by default.
 
+Successful CI/CD runs also provide a tested `linux/amd64` image through GHCR. See
+[container delivery and installation](ci-cd.md) for revision tags, registry access,
+and how to use a selected image with the existing Compose service.
+
 ## Included maintenance helpers
 
 The Compose file also contains a `restarter` service. Its command refers to `docker`, a fixed container name, and a scheduled time, but the service definition does not install a Docker CLI or guarantee that container name. Its shell dollar escaping is also inconsistent, and its loop exits after the scheduled attempt. Treat it as an unvalidated helper rather than a reliable daily restart facility. The commissioning command above deliberately starts only `vantage-publisher`.

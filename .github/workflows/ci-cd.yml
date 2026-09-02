@@ -1,0 +1,127 @@
+name: CI and container delivery
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.12', '3.13']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile Python sources
+        run: python3 -m py_compile vantage-publisher.py airlink.py collect-history.py tests/test_publisher.py
+      - name: Run offline regression tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Validate sample JSON
+        run: |
+          python3 -m json.tool config.json.sample > /dev/null
+          python3 -m json.tool parameters.json.sample > /dev/null
+
+  container:
+    name: Build and smoke-test container
+    needs: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build runtime image
+        run: |
+          docker build --pull \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag vantage-publisher:ci .
+      - name: Check installed dependencies and entry point
+        run: |
+          docker run --rm --network none vantage-publisher:ci python3 -m pip check
+          docker run --rm --network none vantage-publisher:ci python3 -c \
+            'import paho.mqtt.client as mqtt; import requests; import websocket; from pyvantagepro import VantagePro2; mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)'
+          docker run --rm --network none vantage-publisher:ci python3 vantage-publisher.py --help
+      - name: Save tested image for delivery
+        if: github.event_name == 'push'
+        run: docker save vantage-publisher:ci --output "${RUNNER_TEMP}/vantage-publisher.tar"
+      - name: Upload tested image
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tested-container
+          path: ${{ runner.temp }}/vantage-publisher.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    name: Publish tested image to GHCR
+    needs: container
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download tested image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-container
+          path: ${{ runner.temp }}/tested-container
+      - name: Load tested image
+        run: docker load --input "${RUNNER_TEMP}/tested-container/vantage-publisher.tar"
+      - name: Sign in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag and publish
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          revision_tag="sha-${GITHUB_SHA}"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            release_tag=latest
+          else
+            release_tag="$RELEASE_REF"
+          fi
+          if [[ ! "$release_tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "Version tag is not a valid container tag" >&2
+            exit 1
+          fi
+          docker tag vantage-publisher:ci "${image}:${revision_tag}"
+          docker push "${image}:${revision_tag}"
+          docker tag vantage-publisher:ci "${image}:${release_tag}"
+          docker push "${image}:${release_tag}"
+          {
+            echo "### Published container"
+            echo "- Image: ${image}:${revision_tag}"
+            echo "- Channel: ${image}:${release_tag}"
+            echo "- Platform: linux/amd64"
+          } >> "$GITHUB_STEP_SUMMARY"

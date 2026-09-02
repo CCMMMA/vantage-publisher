@@ -15,6 +15,8 @@
 | `Dockerfile`, `docker-compose.yml`, `Makefile` | Container build and launch definitions |
 | `util/` | Serial bridge configuration and service example |
 | `updater.sh`, `get-docker.sh` | Update and host-provisioning helpers with deployment-specific assumptions |
+| `.github/workflows/ci-cd.yml` | Automated checks, container smoke tests, and GHCR delivery |
+| `.dockerignore` | Allowlist of files sent to the Docker build context |
 | `docs/` | Behavioral reference and operational procedures |
 | `AGENTS.md` | Repository maintenance constraints |
 
@@ -50,6 +52,9 @@ The documented baseline contains eight regression cases:
 | Dry datetime handling | A datetime-valued packet is logged and the configured delay is observed |
 
 The suite passed when the initial reliability changes were prepared. This statement is a local regression result, not a claim of exhaustive testing. Syntax compilation also cannot establish runtime behavior or dependency compatibility.
+
+The [CI/CD workflow](ci-cd.md) runs these Python checks automatically and adds a
+container build with real dependency import checks before publishing eligible images.
 
 ## Integration validation strategy
 

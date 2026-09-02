@@ -15,6 +15,7 @@ This documentation describes the implementation in this repository as reviewed o
 | Interpret exported observations | [Data model](data-model.md), then [Integrations](integrations.md) |
 | Maintain an unattended installation | [Operations and reliability](operations.md) |
 | Recover historical console observations | [Archive collection](archive-collection.md) |
+| Build and release container images | [CI/CD](ci-cd.md) |
 | Modify and validate the implementation | [Development and validation](development.md) |
 | Locate the basis for technical claims | [Sources and terminology](references.md) |
 
